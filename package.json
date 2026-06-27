@@ -1,0 +1,53 @@
+{
+  "name": "@swiftengineer/pi-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SwiftEngineer Pi harness package: compact prompt, policy, task/subagents, search, AST, web search, todos, and ask tools.",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "smoke": "node scripts/smoke.mjs",
+    "postinstall": "node scripts/postinstall.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/system-prompt.ts",
+      "./extensions/tool-policy.ts",
+      "./extensions/search.ts",
+      "./extensions/ast-tools.ts",
+      "./extensions/todo-write.ts",
+      "./extensions/ask.ts",
+      "./extensions/web-search.ts",
+      "./extensions/task/index.ts"
+    ],
+    "skills": ["./skills"],
+    "prompts": ["./prompts"],
+    "themes": ["./themes"]
+  },
+  "dependencies": {
+    "@ast-grep/cli": "0.44.0",
+    "glob": "13.0.6",
+    "ignore": "7.0.5"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.80.2",
+    "@earendil-works/pi-agent-core": "0.80.2",
+    "@earendil-works/pi-coding-agent": "0.80.2",
+    "@earendil-works/pi-tui": "0.80.2",
+    "@types/node": "24.12.4",
+    "jiti": "2.7.0",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
