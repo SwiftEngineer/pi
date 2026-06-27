@@ -1,0 +1,31 @@
+{
+  "name": "SwiftEngineer Pi Distribution",
+  "description": "A custom distribution of the Pi coding agent: the SwiftEngineer default harness plus the token-efficient MCP adapter.",
+  "pi": "@earendil-works/pi-coding-agent@0.84.3",
+  "packages": [
+    {
+      "name": "@swiftengineer/pi-harness",
+      "role": "harness",
+      "source": "ssh://git@github.com/SwiftEngineer/pi",
+      "description": "Default SwiftEngineer agent harness: compact prompt, tool policy, task/subagents, search, ls/find, AST, todos, ask."
+    },
+    {
+      "name": "pi-mcp-adapter",
+      "role": "plugin",
+      "source": "npm:pi-mcp-adapter",
+      "description": "Token-efficient MCP adapter: access every MCP server through one ~200-token proxy tool with lazy connections."
+    },
+    {
+      "name": "pi-web-access",
+      "role": "plugin",
+      "source": "npm:pi-web-access",
+      "description": "Web search and content extraction: web_search (OpenAI/Brave/Parallel/Tavily/Exa/Perplexity/Gemini with fallback chains), fetch_content (URLs, GitHub repos, YouTube, PDFs), get_search_content."
+    },
+    {
+      "name": "pi-powerline-footer",
+      "role": "plugin",
+      "source": "https://github.com/nicobailon/pi-powerline-footer",
+      "description": "Powerline-style segmented footer for the Pi TUI: cwd/branch, context %, tokens/cost, model • thinking • provider, rendered as color-blocked segments with powerline separators."
+    }
+  ]
+}

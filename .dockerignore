@@ -1,0 +1,7 @@
+# Build context = repo root (see e2e/Dockerfile). Keep the context small and
+# force clean, in-image installs of all dependencies.
+node_modules
+e2e/node_modules
+e2e/artifacts
+.git
+.claude

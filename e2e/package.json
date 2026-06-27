@@ -1,0 +1,9 @@
+{
+  "name": "pi-harness-e2e",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "node-pty": "^1.0.0",
+    "@xterm/headless": "^5.5.0"
+  }
+}
