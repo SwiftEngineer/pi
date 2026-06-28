@@ -16,6 +16,7 @@ fi
 npm install
 npm install -g --ignore-scripts "$PI_PACKAGE"
 node scripts/patch-pi-settings.mjs
+node scripts/patch-pi-tui-split.mjs
 hash -r
 pi install "$ROOT"
 

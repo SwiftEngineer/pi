@@ -15,10 +15,12 @@ import {
 } from "@earendil-works/pi-tui";
 import type { SubagentRegistry, SubagentSnapshot } from "./registry.ts";
 
-/** Minimal structural view of the TUI we need (terminal size + repaint). */
+/** Minimal structural view of the TUI we need (terminal size, repaint, re-render). */
 export interface TuiLike {
   readonly terminal: { readonly rows: number; readonly columns: number };
   requestRender(force?: boolean): void;
+  /** Render the whole component tree at a given width (used for the vertical split). */
+  render(width: number): string[];
 }
 
 /** Overlay placement/sizing accepted by `ctx.ui.custom`'s `overlayOptions`. */
@@ -127,14 +129,13 @@ export class SubagentPanel implements Component {
     return chooseLayout(this.tui.terminal.columns, this.tui.terminal.rows, this.allowVertical());
   }
 
-  render(width: number): string[] {
+  render(width: number, heightOverride?: number): string[] {
     const theme = this.getTheme();
     const agents = this.registry.list();
     if (agents.length === 0) return [];
 
     const innerWidth = Math.max(1, width - 2);
-    const { panelHeight } = this.layout();
-    const height = Math.max(5, panelHeight);
+    const height = Math.max(5, heightOverride ?? this.layout().panelHeight);
 
     const border = (text: string): string => theme.fg("border", text);
     const frameRow = (content: string): string =>

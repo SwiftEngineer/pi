@@ -362,6 +362,63 @@ if (subagentPanel.render(120).length === 0) throw new Error("subagent panel re-r
 subagentRegistry.reset();
 if (!subagentRegistry.isEmpty() || subagentPanel.render(120).length !== 0) throw new Error("subagent registry reset smoke failed");
 
+// Reserved split-pane composition (core-patch path).
+const { composeSplitFrame, splitRegions } = await jiti.import(path.join(root, "extensions/subagent-view/split.ts"));
+
+if (splitRegions(160, 40, true).orientation !== "vertical") throw new Error("splitRegions wide-vertical smoke failed");
+if (splitRegions(160, 40, false).orientation !== "horizontal") throw new Error("splitRegions opt-out smoke failed");
+if (splitRegions(80, 60, true).orientation !== "horizontal") throw new Error("splitRegions tall-horizontal smoke failed");
+
+subagentRegistry.reset();
+subagentRegistry.add("s:1", "explore", "explore");
+subagentRegistry.start("s:1");
+subagentRegistry.update("s:1", { appendText: "scanning files", phase: "writing" });
+subagentRegistry.add("s:2", "review", "reviewer");
+
+const fakeMain = Array.from({ length: 60 }, (_, i) => `main row ${i}`);
+const splitRender = (w) => fakeMain.map((line) => line.slice(0, w));
+
+const hTui = { terminal: { rows: 40, columns: 120 }, requestRender() {}, render: splitRender };
+const hFrame = composeSplitFrame(hTui, fakeMain, 120, 40, () => titaniumTheme, false);
+if (hFrame.length !== 40) throw new Error("split horizontal frame height smoke failed");
+if (!hFrame.slice(0, 20).join("\n").includes("Sub-agents")) throw new Error("split horizontal panel region smoke failed");
+if (!hFrame.slice(20).join("\n").includes("main row 59")) throw new Error("split horizontal main tail smoke failed");
+for (const line of hFrame) if (visibleWidth(line) > 120) throw new Error("split horizontal width smoke failed");
+
+const vTui = { terminal: { rows: 40, columns: 160 }, requestRender() {}, render: splitRender };
+const vFrame = composeSplitFrame(vTui, fakeMain, 160, 40, () => titaniumTheme, true);
+if (vFrame.length !== 40) throw new Error("split vertical frame height smoke failed");
+for (const line of vFrame) if (visibleWidth(line) > 160) throw new Error("split vertical width smoke failed");
+const vText = vFrame.join("\n");
+if (!vText.includes("Sub-agents")) throw new Error("split vertical panel region smoke failed");
+if (!vText.includes("main row 59")) throw new Error("split vertical main region smoke failed");
+if (!vText.includes("│")) throw new Error("split vertical divider smoke failed");
+
+subagentRegistry.reset();
+if (composeSplitFrame(hTui, fakeMain, 120, 40, () => titaniumTheme, false) !== fakeMain) {
+  throw new Error("split passthrough smoke failed");
+}
+
+// TUI render-loop patch: round-trip + idempotence.
+const { patchTuiSource, unpatchTuiSource } = await import(pathToFileURL(path.join(root, "scripts/patch-pi-tui-split.mjs")).href);
+const tuiSample = [
+  "    doRender() {",
+  "        const width = this.terminal.columns;",
+  "        const height = this.terminal.rows;",
+  "        let newLines = this.render(width);",
+  "        if (this.overlayStack.length > 0) {",
+  "            newLines = this.compositeOverlays(newLines, width, height);",
+  "        }",
+  "    }",
+  "//# sourceMappingURL=tui.js.map",
+  "",
+].join("\n");
+const patchedTui = patchTuiSource(tuiSample);
+if (!patchedTui.includes("globalThis.__piSplitFrame(this, newLines, width, height)")) throw new Error("tui patch hook smoke failed");
+if (!patchedTui.includes("globalThis.__PI_SPLIT_PATCH__ = true;")) throw new Error("tui patch flag smoke failed");
+if (patchTuiSource(patchedTui) !== patchedTui) throw new Error("tui patch idempotence smoke failed");
+if (unpatchTuiSource(patchedTui) !== tuiSample) throw new Error("tui patch reversibility smoke failed");
+
 for (const required of ["search", "ast_grep", "ast_edit", "todo_write", "ask", "web_search", "task"]) {
   if (!tools.has(required)) throw new Error(`missing tool: ${required}`);
 }
