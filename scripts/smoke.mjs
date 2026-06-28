@@ -1,10 +1,18 @@
 import { spawn } from "node:child_process";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { createJiti } from "jiti";
+import { pathToFileURL } from "node:url";
 
 const root = path.resolve(import.meta.dirname, "..");
+process.env.PI_TASK_MAX_RUNTIME_MS ??= "100";
+process.env.PI_TASK_KILL_GRACE_MS ??= "50";
 const jiti = createJiti(import.meta.url, { interopDefault: true });
 const tools = new Map();
+const commands = new Map();
+const renderers = new Map();
+const sentMessages = [];
 const handlers = [];
 
 function execCommand(command, args, options = {}) {
@@ -22,8 +30,21 @@ function execCommand(command, args, options = {}) {
 
 const pi = {
   registerTool(tool) { tools.set(tool.name, tool); },
+  registerCommand(name, command) { commands.set(name, command); },
+  registerMessageRenderer(type, renderer) { renderers.set(type, renderer); },
   on(event, handler) { handlers.push({ event, handler }); },
+  sendMessage(message) { sentMessages.push(message); },
   exec: execCommand,
+  getActiveTools() { return Array.from(tools.keys()); },
+  getAllTools() {
+    return Array.from(tools.values()).map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+      promptGuidelines: tool.promptGuidelines,
+      sourceInfo: { source: "smoke" },
+    }));
+  },
 };
 
 for (const file of [
@@ -34,6 +55,8 @@ for (const file of [
   "extensions/todo-write.ts",
   "extensions/ask.ts",
   "extensions/web-search.ts",
+  "extensions/context.ts",
+  "extensions/tui-powerline.ts",
   "extensions/task/index.ts",
 ]) {
   const mod = await jiti.import(path.join(root, file));
@@ -45,6 +68,33 @@ const ctx = { cwd: root, hasUI: false, ui: {} };
 const search = tools.get("search");
 const searchResult = await search.execute("smoke-search", { pattern: "AGENT_PROMPTS", paths: "extensions/task/index.ts" }, undefined, undefined, ctx);
 if (!searchResult.content[0].text.includes("AGENT_PROMPTS")) throw new Error("search smoke failed");
+
+const smokeTmp = await mkdtemp(path.join(os.tmpdir(), "pi-harness-smoke-"));
+try {
+  const longLineFile = path.join(smokeTmp, "huge.js.map");
+  await writeFile(longLineFile, `needle${"x".repeat(200_000)}\n`, "utf8");
+  const cappedSearchResult = await search.execute("smoke-search-cap", { pattern: "needle", paths: longLineFile, context: 0, gitignore: false }, undefined, undefined, ctx);
+  const cappedSearchText = cappedSearchResult.content[0].text;
+  if (Buffer.byteLength(cappedSearchText, "utf8") > 60 * 1024) throw new Error("search cap smoke failed");
+  if (!cappedSearchText.includes("line truncated")) throw new Error("search long-line truncation smoke failed");
+
+  const fakePi = path.join(smokeTmp, "fake-pi.mjs");
+  await writeFile(fakePi, "#!/usr/bin/env node\nsetTimeout(() => {}, 60_000);\n", "utf8");
+  await chmod(fakePi, 0o755);
+  const previousPiCommand = process.env.SWIFT_PI_COMMAND;
+  process.env.SWIFT_PI_COMMAND = fakePi;
+  try {
+    const task = tools.get("task");
+    const taskResult = await task.execute("smoke-task-timeout", { agent: "task", tasks: [{ id: "Timeout", description: "Timeout", assignment: "Hang" }] }, undefined, undefined, ctx);
+    if (!taskResult.content[0].text.includes("timed out")) throw new Error("task timeout smoke failed");
+    if (taskResult.details.results[0].exitCode !== 124 || taskResult.details.results[0].timedOut !== true) throw new Error("task timeout details smoke failed");
+  } finally {
+    if (previousPiCommand === undefined) delete process.env.SWIFT_PI_COMMAND;
+    else process.env.SWIFT_PI_COMMAND = previousPiCommand;
+  }
+} finally {
+  await rm(smokeTmp, { recursive: true, force: true });
+}
 
 const todo = tools.get("todo_write");
 const todoResult = await todo.execute("smoke-todo", { ops: [{ op: "init", list: [{ phase: "Smoke", items: ["Run smoke"] }] }, { op: "done", task: "Run smoke" }] }, undefined, undefined, ctx);
@@ -61,6 +111,201 @@ if (!astResult.content[0].text.includes("AGENT_PROMPTS")) throw new Error("ast_g
 const web = tools.get("web_search");
 const webResult = await web.execute("smoke-web", { query: "example" }, undefined, undefined, ctx);
 if (!webResult.content[0].text.includes("BRAVE_API_KEY")) throw new Error("web_search smoke failed");
+
+const { loadThemeFromPath } = await import(pathToFileURL(
+  path.join(root, "node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js"),
+).href);
+const titaniumTheme = loadThemeFromPath(path.join(root, "themes/titanium.json"), "truecolor");
+if (titaniumTheme.name !== "titanium") throw new Error("titanium theme load smoke failed");
+
+let capturedFooterFactory;
+let capturedTitle;
+const powerlineSessionStart = handlers.find((handler) => handler.event === "session_start");
+if (!powerlineSessionStart) throw new Error("powerline footer session_start handler smoke failed");
+powerlineSessionStart.handler({ type: "session_start", reason: "new" }, {
+  cwd: root,
+  mode: "tui",
+  hasUI: true,
+  ui: {
+    setFooter(factory) { capturedFooterFactory = factory; },
+    setTitle(title) { capturedTitle = title; },
+  },
+  model: { id: "smoke-model", provider: "smoke", contextWindow: 100000, reasoning: true },
+  getContextUsage() { return { tokens: 76000, contextWindow: 100000, percent: 76 }; },
+  sessionManager: {
+    getCwd() { return root; },
+    getSessionName() { return "Smoke Session"; },
+    getHeader() { return { type: "session", id: "smoke-session-id", timestamp: new Date(0).toISOString(), cwd: root }; },
+    getEntries() { return [{ type: "thinking_level_change", thinkingLevel: "high" }]; },
+  },
+});
+if (!capturedFooterFactory || capturedTitle !== "Smoke Session") throw new Error("powerline footer registration smoke failed");
+const powerlineFooter = capturedFooterFactory({}, titaniumTheme, {
+  getGitBranch() { return "main"; },
+  getExtensionStatuses() { return new Map(); },
+  getAvailableProviderCount() { return 1; },
+  onBranchChange() { return () => {}; },
+});
+const powerlineLines = powerlineFooter.render(160);
+if (powerlineLines.length !== 1) throw new Error("powerline footer should render session on the main segment line");
+const powerlineOutput = powerlineLines.join("\n");
+for (const expected of ["", "Smoke Session", "smoke-model", "high", " main", " 76k/100k", "76%"] ) {
+  if (!powerlineOutput.includes(expected)) throw new Error(`powerline footer smoke failed: ${expected}`);
+}
+for (const forbidden of [" Pi", "Effort", " 76k/100k 76%"] ) {
+  if (powerlineOutput.includes(forbidden)) throw new Error(`powerline footer should not include: ${forbidden}`);
+}
+if (powerlineOutput.lastIndexOf("Smoke Session") <= powerlineOutput.indexOf("76%")) {
+  throw new Error("powerline footer session badge should be on the right side of the main line");
+}
+if (!powerlineOutput.includes("\x1b[38;2;248;250;252m\x1b[48;2;239;68;68m 76% ")) {
+  throw new Error("powerline footer red context percentage should use white text");
+}
+
+capturedFooterFactory = undefined;
+capturedTitle = undefined;
+powerlineSessionStart.handler({ type: "session_start", reason: "new" }, {
+  cwd: root,
+  mode: "tui",
+  hasUI: true,
+  ui: {
+    setFooter(factory) { capturedFooterFactory = factory; },
+    setTitle(title) { capturedTitle = title; },
+  },
+  model: { id: "smoke-model", provider: "smoke", contextWindow: 100000, reasoning: true },
+  getContextUsage() { return { tokens: 20000, contextWindow: 100000, percent: 20 }; },
+  sessionManager: {
+    getCwd() { return root; },
+    getSessionName() { return undefined; },
+    getHeader() { return { type: "session", id: "smoke-session-id", timestamp: new Date(0).toISOString(), cwd: root }; },
+    getEntries() { return []; },
+  },
+});
+if (!capturedFooterFactory || capturedTitle !== undefined) throw new Error("powerline footer unnamed session title smoke failed");
+const unnamedPowerlineOutput = capturedFooterFactory({}, titaniumTheme, {
+  getGitBranch() { return null; },
+  getExtensionStatuses() { return new Map(); },
+  getAvailableProviderCount() { return 1; },
+  onBranchChange() { return () => {}; },
+}).render(160).join("\n");
+for (const forbidden of ["Smoke Session", "smoke-session-id", "Untitled", "Session"]) {
+  if (unnamedPowerlineOutput.includes(forbidden)) throw new Error(`powerline footer unnamed session should not include: ${forbidden}`);
+}
+if (!unnamedPowerlineOutput.includes("\x1b[38;2;2;6;23m\x1b[48;2;34;197;94m 20% ")) {
+  throw new Error("powerline footer low context percentage should be green with readable text");
+}
+
+const contextCommand = commands.get("context");
+if (!contextCommand) throw new Error("missing command: context");
+const contextSentStart = sentMessages.length;
+const contextCtx = {
+  cwd: root,
+  mode: "tui",
+  hasUI: true,
+  ui: {
+    notify() {},
+    theme: titaniumTheme,
+  },
+  model: { id: "smoke-model", name: "Smoke Model", contextWindow: 100000 },
+  getContextUsage() { return { tokens: null, contextWindow: 100000, percent: null }; },
+  getSystemPrompt() { return "System prompt for smoke."; },
+  getSystemPromptOptions() {
+    return { cwd: root, contextFiles: [{ path: "AGENTS.md", content: "smoke context" }], skills: [] };
+  },
+  sessionManager: {
+    getBranch() {
+      return [{
+        type: "message",
+        id: "smoke-user",
+        parentId: null,
+        timestamp: new Date(0).toISOString(),
+        message: { role: "user", content: "hello context", timestamp: 0 },
+      }];
+    },
+  },
+};
+await contextCommand.handler("", contextCtx);
+const contextMessage = sentMessages[contextSentStart];
+if (!contextMessage) throw new Error("context command message smoke failed");
+if (contextMessage.customType !== "context-usage") throw new Error("context command message type smoke failed");
+if (!renderers.has("context-usage")) throw new Error("context renderer registration smoke failed");
+const contextRenderer = renderers.get("context-usage");
+const contextComponent = contextRenderer?.(contextMessage, { expanded: false }, titaniumTheme);
+if (!contextComponent) throw new Error("context renderer smoke failed");
+const contextOutput = contextComponent.render(120).join("\n");
+if (!contextOutput.includes("⛁")) throw new Error("context command grid smoke failed");
+if (!contextOutput.includes("Estimated usage by category")) throw new Error("context command legend smoke failed");
+if (!contextOutput.includes("\u001b[38;2;0;180;255m")) throw new Error("context command titanium color smoke failed");
+
+
+const { TabBar } = await jiti.import(path.join(root, "extensions/settings/tab-bar.ts"));
+const identityTheme = {
+  label: (text) => text,
+  activeTab: (text) => `[${text}]`,
+  inactiveTab: (text) => text,
+  hint: (text) => text,
+  mutedTab: (text) => `(${text})`,
+  hoverTab: (text) => `{${text}}`,
+};
+const tabBar = new TabBar("Settings", [
+  { id: "appearance", label: "Appearance", short: "A" },
+  { id: "disabled", label: "Disabled", short: "D", muted: true },
+  { id: "tools", label: "Tools", short: "T" },
+], identityTheme);
+tabBar.showHint = false;
+let changedTab = "";
+tabBar.onTabChange = (tab) => { changedTab = tab.id; };
+if (!tabBar.render(80)[0].includes("Settings:")) throw new Error("tab bar smoke render failed");
+tabBar.nextTab();
+if (tabBar.getActiveTab().id !== "tools" || changedTab !== "tools") throw new Error("tab bar smoke navigation failed");
+const renderedTabLine = tabBar.render(80)[0];
+const disabledColumn = renderedTabLine.indexOf("( Disabled ") + 1;
+if (tabBar.tabAt(0, 0)?.id !== undefined) throw new Error("tab bar smoke hit zone boundary failed");
+if (disabledColumn <= 0 || tabBar.tabAt(0, disabledColumn)?.id !== "disabled") throw new Error("tab bar smoke hit zone failed");
+
+const { patchSettingsManager, patchSettingsSelector } = await import(pathToFileURL(path.join(root, "scripts/patch-pi-settings.mjs")).href);
+const legacyPatchedSettingsSelector = `
+const SETTINGS_TAB_BY_ID = {
+    "follow-up-mode": "interaction",
+    "hide-thinking": "display",
+};
+const items = [
+            {
+                id: "follow-up-mode",
+            },
+            {
+                id: "hide-thinking",
+            },
+];
+function applySetting(callbacks, newValue) {
+            switch ("follow-up-mode") {
+                case "follow-up-mode":
+                    callbacks.onFollowUpModeChange(newValue);
+                    break;
+                case "hide-thinking":
+                    callbacks.onHideThinkingBlockChange(newValue === "true");
+                    break;
+            }
+}
+this.tabBar = new TabBar("Settings", SETTINGS_TABS.map((tab) => ({ ...tab, muted: (this.settingsListsByTab[tab.id]?.render(1).length ?? 0) === 0 })), tabTheme());
+// SWIFTENGINEER_TABBED_SETTINGS_PATCH
+`;
+const restoredSettingsSelector = patchSettingsSelector(legacyPatchedSettingsSelector);
+if (!restoredSettingsSelector.includes('transport: "network"')) throw new Error("settings patch transport tab mapping smoke failed");
+if (!restoredSettingsSelector.includes('id: "transport"')) throw new Error("settings patch transport item smoke failed");
+if (!restoredSettingsSelector.includes('values: ["sse", "websocket", "websocket-cached", "auto"]')) throw new Error("settings patch transport values smoke failed");
+if (!restoredSettingsSelector.includes("Choose sse to disable OpenAI Codex WebSockets")) throw new Error("settings patch transport description smoke failed");
+if (!restoredSettingsSelector.includes("callbacks.onTransportChange(newValue);")) throw new Error("settings patch transport handler smoke failed");
+if (restoredSettingsSelector.includes("muted: (this.settingsListsByTab")) throw new Error("settings patch stale muted tab smoke failed");
+const upstreamSettingsManager = `
+    getTransport() {
+        return this.settings.transport ?? "auto";
+    }
+`;
+const restoredSettingsManager = patchSettingsManager(upstreamSettingsManager);
+if (!restoredSettingsManager.includes('return this.settings.transport ?? "sse";')) throw new Error("settings manager transport default smoke failed");
+if (patchSettingsManager(restoredSettingsManager) !== restoredSettingsManager) throw new Error("settings manager transport default idempotence smoke failed");
+
 
 for (const required of ["search", "ast_grep", "ast_edit", "todo_write", "ask", "web_search", "task"]) {
   if (!tools.has(required)) throw new Error(`missing tool: ${required}`);
