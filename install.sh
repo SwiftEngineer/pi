@@ -20,6 +20,7 @@ node -e 'const v=process.versions.node.split(".").map(Number); if (v[0] < 22 || 
 cd "$ROOT"
 npm install
 npm install -g --ignore-scripts "$PI_PACKAGE"
+node scripts/patch-pi-settings.mjs
 hash -r
 
 if ! command -v pi >/dev/null 2>&1; then
