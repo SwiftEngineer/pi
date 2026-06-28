@@ -29,13 +29,23 @@ function execCommand(command, args, options = {}) {
   return completion.promise;
 }
 
+async function waitFor(predicate, timeoutMs = 1000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const value = predicate();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("timed out waiting for smoke condition");
+}
+
 const pi = {
   registerTool(tool) { tools.set(tool.name, tool); },
   registerCommand(name, command) { commands.set(name, command); },
   registerMessageRenderer(type, renderer) { renderers.set(type, renderer); },
   registerShortcut(shortcut, options) { shortcuts.set(shortcut, options); },
   on(event, handler) { handlers.push({ event, handler }); },
-  sendMessage(message) { sentMessages.push(message); },
+  sendMessage(message, options) { sentMessages.push({ ...message, options }); },
   exec: execCommand,
   getActiveTools() { return Array.from(tools.keys()); },
   getAllTools() {
@@ -82,15 +92,26 @@ try {
   if (!cappedSearchText.includes("line truncated")) throw new Error("search long-line truncation smoke failed");
 
   const fakePi = path.join(smokeTmp, "fake-pi.mjs");
-  await writeFile(fakePi, "#!/usr/bin/env node\nsetTimeout(() => {}, 60_000);\n", "utf8");
+  await writeFile(fakePi, `#!/usr/bin/env node
+const event = {
+  type: "message_end",
+  message: { role: "assistant", content: [{ type: "text", text: "background result" }] },
+};
+console.log(JSON.stringify(event));
+`, "utf8");
   await chmod(fakePi, 0o755);
   const previousPiCommand = process.env.SWIFT_PI_COMMAND;
   process.env.SWIFT_PI_COMMAND = fakePi;
   try {
     const task = tools.get("task");
-    const taskResult = await task.execute("smoke-task-timeout", { agent: "task", tasks: [{ id: "Timeout", description: "Timeout", assignment: "Hang" }] }, undefined, undefined, ctx);
-    if (!taskResult.content[0].text.includes("timed out")) throw new Error("task timeout smoke failed");
-    if (taskResult.details.results[0].exitCode !== 124 || taskResult.details.results[0].timedOut !== true) throw new Error("task timeout details smoke failed");
+    const sentStart = sentMessages.length;
+    const taskResult = await task.execute("smoke-task-background", { agent: "task", tasks: [{ id: "Background", description: "Background", assignment: "Run" }] }, undefined, undefined, ctx);
+    if (!taskResult.content[0].text.includes("Started 1 background sub-agent")) throw new Error("task background start smoke failed");
+    if (taskResult.details.background !== true || taskResult.details.jobId !== "subagents:smoke-task-background") throw new Error("task background details smoke failed");
+    const finalMessage = await waitFor(() => sentMessages.slice(sentStart).find((message) => message.customType === "subagent-results"));
+    if (!finalMessage.content.includes("background result")) throw new Error("task background final message smoke failed");
+    if (finalMessage.options?.triggerTurn !== true || finalMessage.options?.deliverAs !== "followUp") throw new Error("task background final delivery smoke failed");
+    if (finalMessage.details.results[0].exitCode !== 0) throw new Error("task background result details smoke failed");
   } finally {
     if (previousPiCommand === undefined) delete process.env.SWIFT_PI_COMMAND;
     else process.env.SWIFT_PI_COMMAND = previousPiCommand;

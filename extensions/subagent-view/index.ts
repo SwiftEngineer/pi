@@ -219,12 +219,13 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
     syncSplit();
   });
 
-  // A fresh user turn starts with a clean slate of sub-agents.
+  // Keep background sub-agents visible across top-level turns. The task tool
+  // resets stale finished agents when starting a fresh background batch.
   pi.on("agent_start", (_event, ctx) => {
     if (ctx.mode === "tui") latestCtx = ctx;
     userHidden = false;
     splitDisabled = false;
-    subagentRegistry.reset();
+    syncSplit();
   });
 
   pi.on("session_shutdown", () => {
