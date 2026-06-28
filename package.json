@@ -22,7 +22,8 @@
       "./extensions/web-search.ts",
       "./extensions/context.ts",
       "./extensions/tui-powerline.ts",
-      "./extensions/task/index.ts"
+      "./extensions/task/index.ts",
+      "./extensions/subagent-view/index.ts"
     ],
     "skills": ["./skills"],
     "prompts": ["./prompts"],

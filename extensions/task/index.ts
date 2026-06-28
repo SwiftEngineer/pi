@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { type SubagentFinish, type SubagentLiveUpdate, subagentRegistry } from "../subagent-view/registry.ts";
 
 const MAX_CONCURRENCY = positiveIntFromEnv("PI_TASK_MAX_CONCURRENCY", 4);
 const MAX_OUTPUT_BYTES = positiveIntFromEnv("PI_TASK_MAX_OUTPUT_BYTES", 500_000);
@@ -176,7 +177,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function assistantTextFromEvent(line: string): string | undefined {
+function parseEvent(line: string): Record<string, unknown> | undefined {
   if (Buffer.byteLength(line, "utf8") > MAX_JSON_EVENT_BYTES) return undefined;
   let parsed: unknown;
   try {
@@ -184,14 +185,56 @@ function assistantTextFromEvent(line: string): string | undefined {
   } catch {
     return undefined;
   }
-  if (!isObject(parsed) || parsed.type !== "message_end" || !isObject(parsed.message)) return undefined;
-  const message = parsed.message;
+  return isObject(parsed) ? parsed : undefined;
+}
+
+function assistantTextFromMessageEnd(event: Record<string, unknown>): string | undefined {
+  if (event.type !== "message_end" || !isObject(event.message)) return undefined;
+  const message = event.message;
   if (message.role !== "assistant" || !Array.isArray(message.content)) return undefined;
   const parts: string[] = [];
   for (const part of message.content) {
     if (isObject(part) && part.type === "text" && typeof part.text === "string") parts.push(part.text);
   }
   return parts.length > 0 ? parts.join("\n") : undefined;
+}
+
+/** Derive a live panel update from a single JSON event line, if any. */
+function liveFromEvent(event: Record<string, unknown>): SubagentLiveUpdate | undefined {
+  switch (event.type) {
+    case "turn_start":
+      return { phase: "thinking" };
+    case "message_start":
+      return { resetText: true, phase: "writing" };
+    case "message_update": {
+      const ev = event.assistantMessageEvent;
+      if (!isObject(ev)) return undefined;
+      if (ev.type === "text_delta" && typeof ev.delta === "string") return { appendText: ev.delta, phase: "writing" };
+      if (ev.type === "thinking_delta" && typeof ev.delta === "string") return { appendThinking: ev.delta, phase: "reasoning" };
+      return undefined;
+    }
+    case "tool_execution_start": {
+      const tool = typeof event.toolName === "string" ? event.toolName : undefined;
+      return { tool: tool ?? null, phase: tool ? `using ${tool}` : "running" };
+    }
+    case "tool_execution_end":
+      return { tool: null, phase: "working" };
+    case "agent_end":
+      return { phase: "done" };
+    default:
+      return undefined;
+  }
+}
+
+/** Map a settled subtask to its registry finish payload. */
+function finishFromResult(result: SubtaskResult): SubagentFinish {
+  if (result.exitCode === 0) return { state: "done", final: result.finalText, exitInfo: "completed" };
+  const exitInfo = result.timedOut
+    ? "timed out"
+    : result.aborted
+      ? "aborted"
+      : `failed (${result.exitCode})`;
+  return { state: "error", final: result.finalText, exitInfo };
 }
 
 function truncateInline(text: string): string {
@@ -234,7 +277,7 @@ function killChild(child: { pid?: number | undefined; kill(signal: NodeJS.Signal
   }
 }
 
-async function runSubtask(ctxCwd: string, agent: string, context: string | undefined, task: TaskParamsType["tasks"][number], signal: AbortSignal | undefined): Promise<SubtaskResult> {
+async function runSubtask(ctxCwd: string, agent: string, context: string | undefined, task: TaskParamsType["tasks"][number], signal: AbortSignal | undefined, onLive?: (update: SubagentLiveUpdate) => void): Promise<SubtaskResult> {
   const config = AGENT_PROMPTS[agent] ?? AGENT_PROMPTS.task;
   if (!config) throw new Error("Built-in task agent prompt is missing.");
   const assignment = context ? `${context}\n\n${task.assignment}` : task.assignment;
@@ -263,8 +306,14 @@ async function runSubtask(ctxCwd: string, agent: string, context: string | undef
   const abortHandler = () => terminate("abort");
 
   const processLine = (line: string) => {
-    const text = assistantTextFromEvent(line);
+    const event = parseEvent(line);
+    if (!event) return;
+    const text = assistantTextFromMessageEnd(event);
     if (text) finalText.reset(text);
+    if (onLive) {
+      const update = liveFromEvent(event);
+      if (update) onLive(update);
+    }
   };
 
   const terminate = (reason: "abort" | "timeout") => {
@@ -387,15 +436,30 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: TaskParams,
     executionMode: "parallel",
-    async execute(_toolCallId, params: TaskParamsType, signal, _onUpdate, ctx) {
+    async execute(toolCallId, params: TaskParamsType, signal, _onUpdate, ctx) {
       if (params.tasks.length === 0) {
         return { content: [{ type: "text", text: "No tasks supplied." }], details: { results: [] } };
       }
+      // Register every sub-agent up front so the live panel shows all of them
+      // (including queued ones) as soon as the tool call begins.
+      const registryIds = new Map<string, string>();
+      for (const task of params.tasks) {
+        const id = `${toolCallId}:${task.id}`;
+        registryIds.set(task.id, id);
+        subagentRegistry.add(id, task.description, params.agent);
+      }
       const results = await mapLimit(params.tasks, MAX_CONCURRENCY, async (task) => {
+        const registryId = registryIds.get(task.id);
+        if (registryId) subagentRegistry.start(registryId);
+        const update = registryId ? (patch: SubagentLiveUpdate) => subagentRegistry.update(registryId, patch) : undefined;
         try {
-          return await runSubtask(ctx.cwd, params.agent, params.context, task, signal);
+          const result = await runSubtask(ctx.cwd, params.agent, params.context, task, signal, update);
+          if (registryId) subagentRegistry.finish(registryId, finishFromResult(result));
+          return result;
         } catch (error) {
-          return failedResult(task, error);
+          const failed = failedResult(task, error);
+          if (registryId) subagentRegistry.finish(registryId, { state: "error", final: failed.finalText, exitInfo: "failed" });
+          return failed;
         }
       });
       const failed = results.some((result) => result.exitCode !== 0);

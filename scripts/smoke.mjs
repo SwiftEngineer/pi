@@ -12,6 +12,7 @@ const jiti = createJiti(import.meta.url, { interopDefault: true });
 const tools = new Map();
 const commands = new Map();
 const renderers = new Map();
+const shortcuts = new Map();
 const sentMessages = [];
 const handlers = [];
 
@@ -32,6 +33,7 @@ const pi = {
   registerTool(tool) { tools.set(tool.name, tool); },
   registerCommand(name, command) { commands.set(name, command); },
   registerMessageRenderer(type, renderer) { renderers.set(type, renderer); },
+  registerShortcut(shortcut, options) { shortcuts.set(shortcut, options); },
   on(event, handler) { handlers.push({ event, handler }); },
   sendMessage(message) { sentMessages.push(message); },
   exec: execCommand,
@@ -58,6 +60,7 @@ for (const file of [
   "extensions/context.ts",
   "extensions/tui-powerline.ts",
   "extensions/task/index.ts",
+  "extensions/subagent-view/index.ts",
 ]) {
   const mod = await jiti.import(path.join(root, file));
   mod.default(pi);
@@ -306,6 +309,58 @@ const restoredSettingsManager = patchSettingsManager(upstreamSettingsManager);
 if (!restoredSettingsManager.includes('return this.settings.transport ?? "sse";')) throw new Error("settings manager transport default smoke failed");
 if (patchSettingsManager(restoredSettingsManager) !== restoredSettingsManager) throw new Error("settings manager transport default idempotence smoke failed");
 
+
+const { subagentRegistry } = await jiti.import(path.join(root, "extensions/subagent-view/registry.ts"));
+const { SubagentPanel, chooseLayout } = await jiti.import(path.join(root, "extensions/subagent-view/panel.ts"));
+const { visibleWidth } = await import("@earendil-works/pi-tui");
+
+for (const shortcut of ["alt+s", "alt+a", "ctrl+\\"]) {
+  if (!shortcuts.has(shortcut)) throw new Error(`subagent-view shortcut missing: ${shortcut}`);
+}
+
+if (chooseLayout(200, 50, true).orientation !== "vertical") throw new Error("subagent layout wide-vertical smoke failed");
+if (chooseLayout(200, 50, false).orientation !== "horizontal") throw new Error("subagent layout vertical opt-out smoke failed");
+if (chooseLayout(80, 70, true).orientation !== "horizontal") throw new Error("subagent layout tall-horizontal smoke failed");
+
+subagentRegistry.reset();
+subagentRegistry.add("call:One", "explore auth", "explore");
+subagentRegistry.add("call:Two", "review diff", "reviewer");
+subagentRegistry.add("call:Three", "write docs", "task");
+subagentRegistry.start("call:One");
+subagentRegistry.update("call:One", { appendText: "Inspecting the auth module", phase: "writing" });
+subagentRegistry.start("call:Two");
+subagentRegistry.finish("call:Three", { state: "done", final: "Docs written.", exitInfo: "completed" });
+
+const subagentCounts = subagentRegistry.counts();
+if (subagentCounts.total !== 3 || subagentCounts.finished !== 1 || subagentCounts.running !== 2) {
+  throw new Error("subagent registry counts smoke failed");
+}
+
+const fakeSubagentTui = { terminal: { rows: 40, columns: 120 }, requestRender() {} };
+const subagentPanel = new SubagentPanel(fakeSubagentTui, () => titaniumTheme, subagentRegistry, () => false);
+const subagentPanelWidth = 120;
+const subagentPanelLines = subagentPanel.render(subagentPanelWidth);
+if (subagentPanelLines.length === 0) throw new Error("subagent panel should render when agents exist");
+for (const line of subagentPanelLines) {
+  if (visibleWidth(line) > subagentPanelWidth) throw new Error("subagent panel line exceeds width");
+}
+// Lines must stay within bounds at narrow widths too (border/hint must not overflow).
+for (const narrow of [30, 34, 48, 80]) {
+  for (const line of subagentPanel.render(narrow)) {
+    if (visibleWidth(line) > narrow) throw new Error(`subagent panel line exceeds narrow width ${narrow}`);
+  }
+}
+const subagentPanelText = subagentPanelLines.join("\n");
+for (const expected of ["Sub-agents 1/3", "◉", "✓", "●", "explore auth"]) {
+  if (!subagentPanelText.includes(expected)) throw new Error(`subagent panel smoke failed: ${expected}`);
+}
+// Auto-select follows the first running sub-agent and stays there.
+if (subagentRegistry.watched()?.label !== "explore auth") throw new Error("subagent auto-select smoke failed");
+subagentRegistry.cycle(1);
+if (subagentRegistry.watched()?.label !== "review diff") throw new Error("subagent cycle smoke failed");
+if (subagentPanel.render(120).length === 0) throw new Error("subagent panel re-render smoke failed");
+subagentRegistry.reset();
+if (!subagentRegistry.isEmpty() || subagentPanel.render(120).length !== 0) throw new Error("subagent registry reset smoke failed");
 
 for (const required of ["search", "ast_grep", "ast_edit", "todo_write", "ask", "web_search", "task"]) {
   if (!tools.has(required)) throw new Error(`missing tool: ${required}`);

@@ -1,0 +1,306 @@
+/**
+ * Shared, in-memory registry of sub-agents spawned by the `task` tool.
+ *
+ * The `task` extension pushes lifecycle + streaming updates here as it runs
+ * child `pi` processes; the `subagent-view` extension subscribes to render the
+ * live split-screen panel. The two extensions are separate modules, so the
+ * registry is a process-wide singleton (stashed on `globalThis` to survive any
+ * double-evaluation by the jiti extension loader).
+ */
+
+/** Lifecycle state of a single sub-agent. */
+export type SubagentState = "pending" | "running" | "done" | "error";
+
+/** Immutable view of a sub-agent, handed to the renderer. */
+export interface SubagentSnapshot {
+  readonly id: string;
+  /** Short UI label (the task description). */
+  readonly label: string;
+  /** Agent kind, e.g. "explore", "reviewer", "task". */
+  readonly agentKind: string;
+  readonly state: SubagentState;
+  /** Human-readable current activity, e.g. "reasoning" or "using read". */
+  readonly phase: string;
+  /** Name of the tool the sub-agent is currently running, if any. */
+  readonly tool: string | undefined;
+  /** Rolling tail of streamed assistant text for the current message. */
+  readonly text: string;
+  /** Rolling tail of streamed thinking for the current message. */
+  readonly thinking: string;
+  /** Final result text once the sub-agent finishes. */
+  readonly final: string | undefined;
+  /** Outcome label once finished, e.g. "completed" / "failed (1)" / "timed out". */
+  readonly exitInfo: string | undefined;
+  readonly startedAt: number;
+  readonly finishedAt: number | undefined;
+}
+
+/** Partial live update applied during streaming. */
+export interface SubagentLiveUpdate {
+  phase?: string;
+  /** `null` clears the current tool; `undefined` leaves it unchanged. */
+  tool?: string | null;
+  /** Text delta appended to the streaming buffer. */
+  appendText?: string;
+  /** Thinking delta appended to the streaming buffer. */
+  appendThinking?: string;
+  /** Replaces the streaming text buffer (used at message boundaries). */
+  resetText?: boolean;
+}
+
+/** Final outcome reported when a sub-agent process settles. */
+export interface SubagentFinish {
+  state: "done" | "error";
+  final?: string | undefined;
+  exitInfo?: string | undefined;
+}
+
+const MAX_LIVE_TEXT_BYTES = 8 * 1024;
+
+/** Keep the trailing `maxBytes` of UTF-8 text, aligned to a char boundary. */
+function tailBytes(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= maxBytes) return text;
+  let start = buf.length - maxBytes;
+  while (start < buf.length && ((buf[start] ?? 0) & 0xc0) === 0x80) start++;
+  return buf.subarray(start).toString("utf8");
+}
+
+interface SubagentRecord {
+  id: string;
+  label: string;
+  agentKind: string;
+  state: SubagentState;
+  phase: string;
+  tool: string | undefined;
+  text: string;
+  thinking: string;
+  final: string | undefined;
+  exitInfo: string | undefined;
+  startedAt: number;
+  finishedAt: number | undefined;
+}
+
+function snapshot(record: SubagentRecord): SubagentSnapshot {
+  return {
+    id: record.id,
+    label: record.label,
+    agentKind: record.agentKind,
+    state: record.state,
+    phase: record.phase,
+    tool: record.tool,
+    text: record.text,
+    thinking: record.thinking,
+    final: record.final,
+    exitInfo: record.exitInfo,
+    startedAt: record.startedAt,
+    finishedAt: record.finishedAt,
+  };
+}
+
+/**
+ * Tracks every sub-agent for the current agent run and which one the user is
+ * watching. Emits a change event (coalesced by listeners) on any mutation.
+ */
+export class SubagentRegistry {
+  #records = new Map<string, SubagentRecord>();
+  /** Insertion order, so the status-symbol row stays stable. */
+  #order: string[] = [];
+  #watchedId: string | null = null;
+  /** True once the user manually cycles; disables auto-follow. */
+  #manualWatch = false;
+  #listeners = new Set<() => void>();
+
+  /** Subscribe to change notifications. Returns an unsubscribe function. */
+  subscribe(listener: () => void): () => void {
+    this.#listeners.add(listener);
+    return () => {
+      this.#listeners.delete(listener);
+    };
+  }
+
+  #notify(): void {
+    for (const listener of this.#listeners) {
+      try {
+        listener();
+      } catch {
+        // A misbehaving listener must not break registry mutation.
+      }
+    }
+  }
+
+  /** Register a sub-agent before it starts (shows immediately as pending). */
+  add(id: string, label: string, agentKind: string): void {
+    if (this.#records.has(id)) return;
+    const now = Date.now();
+    this.#records.set(id, {
+      id,
+      label: label || id,
+      agentKind,
+      state: "pending",
+      phase: "queued",
+      tool: undefined,
+      text: "",
+      thinking: "",
+      final: undefined,
+      exitInfo: undefined,
+      startedAt: now,
+      finishedAt: undefined,
+    });
+    this.#order.push(id);
+    this.#autoSelect();
+    this.#notify();
+  }
+
+  /** Mark a sub-agent as actively running. */
+  start(id: string): void {
+    const record = this.#records.get(id);
+    if (!record) return;
+    record.state = "running";
+    record.phase = "starting";
+    record.startedAt = Date.now();
+    this.#autoSelect();
+    this.#notify();
+  }
+
+  /** Apply a streaming update. */
+  update(id: string, patch: SubagentLiveUpdate): void {
+    const record = this.#records.get(id);
+    if (!record || record.state === "done" || record.state === "error") return;
+    if (patch.resetText) {
+      record.text = "";
+      record.thinking = "";
+    }
+    if (patch.phase !== undefined) record.phase = patch.phase;
+    if (patch.tool !== undefined) record.tool = patch.tool ?? undefined;
+    if (patch.appendText) record.text = tailBytes(record.text + patch.appendText, MAX_LIVE_TEXT_BYTES);
+    if (patch.appendThinking) {
+      record.thinking = tailBytes(record.thinking + patch.appendThinking, MAX_LIVE_TEXT_BYTES);
+    }
+    this.#notify();
+  }
+
+  /** Settle a sub-agent with its final outcome. */
+  finish(id: string, outcome: SubagentFinish): void {
+    const record = this.#records.get(id);
+    if (!record) return;
+    record.state = outcome.state;
+    record.phase = outcome.state === "error" ? "failed" : "done";
+    record.tool = undefined;
+    record.final = outcome.final;
+    record.exitInfo = outcome.exitInfo;
+    record.finishedAt = Date.now();
+    this.#autoSelect();
+    this.#notify();
+  }
+
+  /**
+   * Until the user manually cycles, follow the first running sub-agent (the one
+   * most likely to be actively streaming), falling back to the first pending or
+   * any sub-agent. This keeps the feed on a working agent and only advances when
+   * the watched one finishes, rather than jumping on every new start.
+   */
+  #autoSelect(): void {
+    if (this.#manualWatch) return;
+    this.#watchedId = this.#preferredId();
+  }
+
+  #preferredId(): string | null {
+    let firstPending: string | null = null;
+    let firstAny: string | null = null;
+    for (const id of this.#order) {
+      const record = this.#records.get(id);
+      if (!record) continue;
+      if (firstAny === null) firstAny = id;
+      if (record.state === "running") return id;
+      if (record.state === "pending" && firstPending === null) firstPending = id;
+    }
+    return firstPending ?? firstAny;
+  }
+
+  /** All sub-agents in stable insertion order. */
+  list(): SubagentSnapshot[] {
+    const out: SubagentSnapshot[] = [];
+    for (const id of this.#order) {
+      const record = this.#records.get(id);
+      if (record) out.push(snapshot(record));
+    }
+    return out;
+  }
+
+  isEmpty(): boolean {
+    return this.#records.size === 0;
+  }
+
+  size(): number {
+    return this.#records.size;
+  }
+
+  counts(): { running: number; finished: number; total: number } {
+    let running = 0;
+    let finished = 0;
+    for (const record of this.#records.values()) {
+      if (record.state === "done" || record.state === "error") finished++;
+      else running++;
+    }
+    return { running, finished, total: this.#records.size };
+  }
+
+  /** The sub-agent currently being watched, if any. */
+  watched(): SubagentSnapshot | undefined {
+    if (this.#watchedId === null) return undefined;
+    const record = this.#records.get(this.#watchedId);
+    return record ? snapshot(record) : undefined;
+  }
+
+  watchedIndex(): number {
+    if (this.#watchedId === null) return -1;
+    return this.#order.indexOf(this.#watchedId);
+  }
+
+  watchedId(): string | null {
+    return this.#watchedId;
+  }
+
+  /** Watch a specific sub-agent by id. Marks the watch as user-driven. */
+  setWatched(id: string): void {
+    if (!this.#records.has(id)) return;
+    this.#manualWatch = true;
+    if (this.#watchedId !== id) {
+      this.#watchedId = id;
+      this.#notify();
+    }
+  }
+
+  /** Cycle the watched sub-agent by `delta` (wrapping). */
+  cycle(delta: number): void {
+    const length = this.#order.length;
+    if (length === 0) return;
+    this.#manualWatch = true;
+    const current = this.#watchedId === null ? -1 : this.#order.indexOf(this.#watchedId);
+    const base = current < 0 ? 0 : current;
+    const next = (((base + delta) % length) + length) % length;
+    const nextId = this.#order[next];
+    if (nextId !== undefined && nextId !== this.#watchedId) {
+      this.#watchedId = nextId;
+      this.#notify();
+    }
+  }
+
+  /** Remove every sub-agent and reset watch state (new agent run). */
+  reset(): void {
+    if (this.#records.size === 0 && this.#watchedId === null && !this.#manualWatch) return;
+    this.#records.clear();
+    this.#order = [];
+    this.#watchedId = null;
+    this.#manualWatch = false;
+    this.#notify();
+  }
+}
+
+const GLOBAL_KEY = "__piSubagentRegistry__";
+const globalStore = globalThis as unknown as Record<string, SubagentRegistry | undefined>;
+
+/** Process-wide singleton shared by the `task` and `subagent-view` extensions. */
+export const subagentRegistry: SubagentRegistry =
+  globalStore[GLOBAL_KEY] ?? (globalStore[GLOBAL_KEY] = new SubagentRegistry());
