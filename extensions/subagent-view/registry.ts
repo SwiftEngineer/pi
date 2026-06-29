@@ -199,6 +199,10 @@ export class SubagentRegistry {
     const blocks = messageToBlocks(message);
     if (blocks.length === 0) return;
     record.blocks.push(...blocks);
+    // The message is now finalized into history; clear the live streaming tail
+    // so it isn't shown twice (once in blocks, once as in-flight text).
+    record.text = "";
+    record.thinking = "";
     this.#notify();
   }
 
