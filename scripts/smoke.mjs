@@ -335,6 +335,7 @@ const { subagentRegistry } = await jiti.import(path.join(root, "extensions/subag
 const { renderStrip, bannerLine } = await jiti.import(path.join(root, "extensions/subagent-view/strip.ts"));
 const { SubagentViewState } = await jiti.import(path.join(root, "extensions/subagent-view/view-state.ts"));
 const { composePagerFrame } = await jiti.import(path.join(root, "extensions/subagent-view/frame.ts"));
+const { messageToBlocks } = await jiti.import(path.join(root, "extensions/subagent-view/transcript.ts"));
 const { visibleWidth } = await import("@earendil-works/pi-tui");
 
 // Shortcuts the redesigned pager registers (new bindings + muscle-memory aliases).
@@ -453,6 +454,64 @@ const noMarkerTui = { terminal: { rows: 40, columns: 120 }, children: [mkChild(p
 if (composePagerFrame(noMarkerTui, mainFrame, 120, 40, pagerDeps) !== mainFrame) throw new Error("pager passthrough (no marker) smoke failed");
 subagentRegistry.reset();
 if (composePagerFrame(pagerTui, mainFrame, 120, 40, pagerDeps) !== mainFrame) throw new Error("pager passthrough (empty) smoke failed");
+
+// --- P4: transcript fidelity — every message role becomes blocks ---
+const bashOk = messageToBlocks({ role: "bashExecution", command: "ls -la", output: "file-a\nfile-b", exitCode: 0, cancelled: false, truncated: false, timestamp: 0 });
+if (!bashOk.some((b) => b.kind === "toolcall" && b.text.includes("ls -la"))) throw new Error("bashExecution command block smoke failed");
+if (!bashOk.some((b) => b.kind === "toolresult" && b.text.includes("file-b") && !b.isError)) throw new Error("bashExecution output block smoke failed");
+const bashErr = messageToBlocks({ role: "bashExecution", command: "false", output: "", exitCode: 1, cancelled: false, truncated: false, timestamp: 0 });
+if (!bashErr.some((b) => b.kind === "toolresult" && b.isError)) throw new Error("bashExecution error flag smoke failed");
+const bashSanitized = messageToBlocks({ role: "bashExecution", command: `echo ${String.fromCharCode(27)}[2Jhi`, output: "", exitCode: 0, cancelled: false, truncated: false, timestamp: 0 });
+if (bashSanitized.some((b) => b.text.includes(String.fromCharCode(27)))) throw new Error("bashExecution sanitize smoke failed");
+const compactBlocks = messageToBlocks({ role: "compactionSummary", summary: "older turns summarized", tokensBefore: 1234, timestamp: 0 });
+if (!compactBlocks.some((b) => b.kind === "meta" && b.text.includes("compacted") && b.text.includes("older turns"))) throw new Error("compactionSummary meta smoke failed");
+const branchBlocks = messageToBlocks({ role: "branchSummary", summary: "explored an alternative", fromId: "x", timestamp: 0 });
+if (!branchBlocks.some((b) => b.kind === "meta" && b.text.includes("branch"))) throw new Error("branchSummary meta smoke failed");
+const customShown = messageToBlocks({ role: "custom", customType: "note", content: "visible note", display: true, timestamp: 0 });
+if (!customShown.some((b) => b.kind === "meta" && b.text.includes("visible note"))) throw new Error("custom display meta smoke failed");
+if (messageToBlocks({ role: "custom", customType: "note", content: "hidden", display: false, timestamp: 0 }).length !== 0) throw new Error("custom hidden should yield no blocks smoke failed");
+
+// --- P4: per-channel memory cap trims oldest blocks + tracks the count ---
+subagentRegistry.reset();
+subagentRegistry.add("cap:1", "long agent", "task");
+for (let i = 0; i < 5200; i++) subagentRegistry.appendMessage("cap:1", { role: "assistant", content: [{ type: "text", text: `MSG_${i}` }] });
+const capAgent = subagentRegistry.list().find((agent) => agent.id === "cap:1");
+if (capAgent.blocks.length > 5000) throw new Error("memory cap not enforced smoke failed");
+if (capAgent.trimmedBlocks <= 0) throw new Error("memory cap trimmedBlocks not tracked smoke failed");
+if (!capAgent.blocks.some((b) => b.text === "MSG_5199")) throw new Error("memory cap dropped newest smoke failed");
+if (capAgent.blocks.some((b) => b.text === "MSG_0")) throw new Error("memory cap kept oldest smoke failed");
+const capState = new SubagentViewState(subagentRegistry, () => titaniumTheme);
+capState.noteRegistryChange();
+capState.select("cap:1");
+const capChildren = [mkChild(["t"]), mkChild([editorLine]), mkChild([footerLine])];
+const capMain = ["t", editorLine, footerLine];
+composePagerFrame({ terminal: { rows: 40, columns: 100 }, children: capChildren }, capMain, 100, 40, { state: capState, getTheme: () => titaniumTheme, ascii: false });
+capState.scrollActiveToTop();
+const capTopFrame = composePagerFrame({ terminal: { rows: 40, columns: 100 }, children: capChildren }, capMain, 100, 40, { state: capState, getTheme: () => titaniumTheme, ascii: false });
+if (!capTopFrame.some((line) => line.includes("trimmed"))) throw new Error("memory cap trimmed marker not rendered smoke failed");
+// retry meta marker
+subagentRegistry.appendMeta("cap:1", "retrying after a transient error (attempt 2/3)");
+if (!subagentRegistry.list().find((a) => a.id === "cap:1").blocks.some((b) => b.kind === "meta" && b.text.includes("retrying"))) throw new Error("appendMeta retry marker smoke failed");
+
+// --- P3: scroll anchor survives a width change (re-wrap on resize) ---
+subagentRegistry.reset();
+subagentRegistry.add("rz:1", "resize agent", "task");
+for (let i = 0; i < 90; i++) subagentRegistry.appendMessage("rz:1", { role: "assistant", content: [{ type: "text", text: `RZBLOCK_${i} ${"lorem ipsum ".repeat(8)}` }] });
+const rzState = new SubagentViewState(subagentRegistry, () => titaniumTheme);
+rzState.noteRegistryChange();
+rzState.select("rz:1");
+const rzChildren = [mkChild(["top"]), mkChild([editorLine]), mkChild([footerLine])];
+const rzMain = ["top", editorLine, footerLine];
+const rzFrame = (cols) => composePagerFrame({ terminal: { rows: 40, columns: cols }, children: rzChildren }, rzMain, cols, 40, { state: rzState, getTheme: () => titaniumTheme, ascii: false });
+const firstBlock = (frame) => { for (const line of frame) { const m = line.match(/RZBLOCK_(\d+)/); if (m) return Number(m[1]); } return -1; };
+rzFrame(120); // establish geometry at the wide width
+rzState.scrollActive(-rzState.pageRows());
+rzState.scrollActive(-rzState.pageRows());
+const wideTopBlock = firstBlock(rzFrame(120));
+const narrowTopBlock = firstBlock(rzFrame(60)); // halve width → roughly doubles wrapped lines
+if (wideTopBlock < 0 || narrowTopBlock < 0) throw new Error("resize anchor smoke setup failed (no block visible)");
+if (Math.abs(wideTopBlock - narrowTopBlock) > 1) throw new Error(`resize anchor drifted ${wideTopBlock} -> ${narrowTopBlock} smoke failed`);
+subagentRegistry.reset();
 
 
 // TUI render-loop patch: round-trip + idempotence.

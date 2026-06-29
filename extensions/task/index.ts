@@ -278,7 +278,7 @@ function killChild(child: { pid?: number | undefined; kill(signal: NodeJS.Signal
   }
 }
 
-async function runSubtask(ctxCwd: string, agent: string, context: string | undefined, task: TaskParamsType["tasks"][number], signal: AbortSignal | undefined, onLive?: (update: SubagentLiveUpdate) => void, onMessage?: (message: AgentMessage) => void): Promise<SubtaskResult> {
+async function runSubtask(ctxCwd: string, agent: string, context: string | undefined, task: TaskParamsType["tasks"][number], signal: AbortSignal | undefined, onLive?: (update: SubagentLiveUpdate) => void, onMessage?: (message: AgentMessage) => void, onMeta?: (text: string) => void): Promise<SubtaskResult> {
   const config = AGENT_PROMPTS[agent] ?? AGENT_PROMPTS.task;
   if (!config) throw new Error("Built-in task agent prompt is missing.");
   const assignment = context ? `${context}\n\n${task.assignment}` : task.assignment;
@@ -315,6 +315,14 @@ async function runSubtask(ctxCwd: string, agent: string, context: string | undef
     // history), separate from the lossy live tail that drives the spinner.
     if (onMessage && event.type === "message_end" && isObject(event.message)) {
       onMessage(event.message as unknown as AgentMessage);
+    }
+    // Surface auto-retries (transient API errors) as a transcript marker so the
+    // reader sees why a turn was re-run rather than just seeing a repeated turn.
+    if (onMeta && event.type === "auto_retry_start") {
+      const attempt = typeof event.attempt === "number" ? event.attempt : undefined;
+      const max = typeof event.maxAttempts === "number" ? event.maxAttempts : undefined;
+      const where = attempt && max ? ` (attempt ${attempt}/${max})` : "";
+      onMeta(`retrying after a transient error${where}`);
     }
     if (onLive) {
       const update = liveFromEvent(event);
@@ -467,8 +475,9 @@ async function runBackgroundBatch(
       if (registryId) subagentRegistry.start(registryId);
       const update = registryId ? (patch: SubagentLiveUpdate) => subagentRegistry.update(registryId, patch) : undefined;
       const onMessage = registryId ? (message: AgentMessage) => subagentRegistry.appendMessage(registryId, message) : undefined;
+      const onMeta = registryId ? (text: string) => subagentRegistry.appendMeta(registryId, text) : undefined;
       try {
-        const result = await runSubtask(ctxCwd, params.agent, params.context, task, controller.signal, update, onMessage);
+        const result = await runSubtask(ctxCwd, params.agent, params.context, task, controller.signal, update, onMessage, onMeta);
         if (registryId) subagentRegistry.finish(registryId, finishFromResult(result));
         return result;
       } catch (error) {

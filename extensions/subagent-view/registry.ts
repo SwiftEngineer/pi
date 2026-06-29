@@ -29,8 +29,10 @@ export interface SubagentSnapshot {
   readonly text: string;
   /** Rolling tail of streamed thinking for the current message. */
   readonly thinking: string;
-  /** Append-only finalized transcript (full history), built from `message_end`. */
+  /** Append-only finalized transcript (most recent history), built from `message_end`. */
   readonly blocks: readonly TranscriptBlock[];
+  /** Count of oldest blocks dropped by the per-channel memory cap (0 ⇒ full history). */
+  readonly trimmedBlocks: number;
   /** Final result text once the sub-agent finishes. */
   readonly final: string | undefined;
   /** Outcome label once finished, e.g. "completed" / "failed (1)" / "timed out". */
@@ -80,11 +82,21 @@ interface SubagentRecord {
   text: string;
   thinking: string;
   blocks: TranscriptBlock[];
+  trimmedBlocks: number;
   final: string | undefined;
   exitInfo: string | undefined;
   startedAt: number;
   finishedAt: number | undefined;
 }
+
+/**
+ * Per-channel cap on the append-only transcript so a long-running sub-agent
+ * can't grow memory without bound. When `blocks` exceeds {@link MAX_BLOCKS} the
+ * oldest are dropped down to {@link KEEP_BLOCKS}; the renderer shows a
+ * "N earlier messages trimmed" marker via the `trimmedBlocks` count.
+ */
+const MAX_BLOCKS = 5000;
+const KEEP_BLOCKS = 4000;
 
 function snapshot(record: SubagentRecord): SubagentSnapshot {
   return {
@@ -97,6 +109,7 @@ function snapshot(record: SubagentRecord): SubagentSnapshot {
     text: record.text,
     thinking: record.thinking,
     blocks: record.blocks,
+    trimmedBlocks: record.trimmedBlocks,
     final: record.final,
     exitInfo: record.exitInfo,
     startedAt: record.startedAt,
@@ -149,6 +162,7 @@ export class SubagentRegistry {
       text: "",
       thinking: "",
       blocks: [],
+      trimmedBlocks: 0,
       final: undefined,
       exitInfo: undefined,
       startedAt: now,
@@ -199,11 +213,34 @@ export class SubagentRegistry {
     const blocks = messageToBlocks(message);
     if (blocks.length === 0) return;
     record.blocks.push(...blocks);
+    this.#capBlocks(record);
     // The message is now finalized into history; clear the live streaming tail
     // so it isn't shown twice (once in blocks, once as in-flight text).
     record.text = "";
     record.thinking = "";
     this.#notify();
+  }
+
+  /**
+   * Append a free-standing meta marker (e.g. a retry/compaction notice that
+   * isn't carried by a `message_end`) to the channel's transcript.
+   */
+  appendMeta(id: string, text: string): void {
+    const record = this.#records.get(id);
+    if (!record) return;
+    const clean = text.trim();
+    if (!clean) return;
+    record.blocks.push({ kind: "meta", text: clean });
+    this.#capBlocks(record);
+    this.#notify();
+  }
+
+  /** Enforce the per-channel block cap, tracking how many were dropped. */
+  #capBlocks(record: SubagentRecord): void {
+    if (record.blocks.length <= MAX_BLOCKS) return;
+    const drop = record.blocks.length - KEEP_BLOCKS;
+    record.blocks.splice(0, drop);
+    record.trimmedBlocks += drop;
   }
 
   /** Settle a sub-agent with its final outcome. */

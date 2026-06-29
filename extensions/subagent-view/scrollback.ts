@@ -21,52 +21,17 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { TranscriptBlock } from "./transcript.ts";
 
-/** Per-channel scroll position. `followTail` pins the view to the latest output. */
-export interface ScrollState {
-  /** Top display-line index, used only when not following the tail. */
-  top: number;
-  /** When true, the view stays pinned to the bottom (newest) as content grows. */
-  followTail: boolean;
-}
-
-export function newScrollState(): ScrollState {
-  return { top: 0, followTail: true };
-}
+/**
+ * Scroll position is owned by the view-state as a logical {@link Anchor} (a
+ * block + line offset, or distance-from-tail) rather than a raw line index, so
+ * it survives re-wrapping on terminal resize. This module only provides the
+ * line-arithmetic primitive {@link maxTop} and the block↔line mapping on
+ * {@link WrappedBuffer}; the anchor resolution lives in view-state.ts.
+ */
 
 /** Largest valid top offset for `total` lines in a `viewport`-row window. */
 export function maxTop(total: number, viewport: number): number {
   return Math.max(0, total - viewport);
-}
-
-/** The effective top line index for the current state. */
-export function resolveTop(state: ScrollState, total: number, viewport: number): number {
-  if (state.followTail) return maxTop(total, viewport);
-  return Math.min(Math.max(0, state.top), maxTop(total, viewport));
-}
-
-/** How many lines are hidden below the viewport (0 ⇒ pinned to the tail). */
-export function linesBelow(state: ScrollState, total: number, viewport: number): number {
-  return maxTop(total, viewport) - resolveTop(state, total, viewport);
-}
-
-/** Scroll by `delta` lines (negative = up). Re-pins to the tail at the bottom. */
-export function scrollLines(state: ScrollState, delta: number, total: number, viewport: number): void {
-  const limit = maxTop(total, viewport);
-  const next = Math.min(Math.max(0, resolveTop(state, total, viewport) + delta), limit);
-  state.top = next;
-  state.followTail = next >= limit;
-}
-
-/** Jump to the top of the history (oldest). */
-export function scrollToTop(state: ScrollState, total: number, viewport: number): void {
-  state.top = 0;
-  state.followTail = total <= viewport;
-}
-
-/** Jump to the live tail (newest) and resume following it. */
-export function scrollToBottom(state: ScrollState): void {
-  state.followTail = true;
-  state.top = 0;
 }
 
 /** Fit a line to an exact column budget (ellipsis on overflow), ANSI-aware. */
@@ -92,7 +57,8 @@ export interface ComposeParts {
   stripLines: string[];
   width: number;
   height: number;
-  scroll: ScrollState;
+  /** Resolved top display-line index of the window (from the view-state's anchor). */
+  top: number;
   /** Builds the loud "viewing history" banner shown when scrolled up. */
   banner?: (linesBelow: number, width: number) => string;
 }
@@ -100,17 +66,20 @@ export interface ComposeParts {
 /**
  * Composite the final frame: a scrollable window of the active channel above a
  * permanently-pinned chrome+strip region. Always returns exactly `height` rows.
+ * Every content line is fit to `width` (ANSI-aware), so a too-wide line can
+ * never reach pi-tui's renderer and tear down the TUI.
  *
  * The cursor marker only ever lives in `chromeLines` (the editor), which is
  * always rendered — so the hardware cursor is never lost, even when scrolled up.
  */
 export function composeFrame(parts: ComposeParts): string[] {
-  const { windowLines, chromeLines, stripLines, width, height, scroll } = parts;
+  const { windowLines, chromeLines, stripLines, width, height } = parts;
   const reserved = chromeLines.length + stripLines.length;
   const viewport = Math.max(1, height - reserved);
   const total = windowLines.length;
-  const top = resolveTop(scroll, total, viewport);
-  const below = maxTop(total, viewport) - top;
+  const limit = maxTop(total, viewport);
+  const top = Math.min(Math.max(0, parts.top), limit);
+  const below = limit - top;
 
   const content: string[] = [];
   for (let i = 0; i < viewport; i++) {
@@ -169,29 +138,88 @@ function renderBlock(block: TranscriptBlock, width: number, theme: Theme): strin
  * only when the blocks or terminal width change, so steady-state slicing stays
  * O(viewport). This is the sub-agent equivalent of the main channel's
  * natively-rendered transcript lines.
+ *
+ * Alongside the lines it tracks the display-line index at which each block
+ * starts, so the view-state can express the scroll position as a logical
+ * (block, offset) {@link Anchor} that survives re-wrapping on resize. When
+ * older history has been trimmed (memory cap) a leading marker line is shown.
  */
 export class WrappedBuffer {
   #blocks: readonly TranscriptBlock[] = [];
+  #trimmedCount = 0;
   #width = -1;
   #revision = -1;
   #appliedRevision = -2;
+  #appliedTrimmed = -1;
   #lines: string[] = [];
+  /** Display-line index where each (local) block begins, at the current width. */
+  #blockStarts: number[] = [];
 
   constructor(private readonly getTheme: () => Theme) {}
 
   /** Point the buffer at the latest blocks. Cheap; re-wrapping is deferred. */
-  setBlocks(blocks: readonly TranscriptBlock[], revision: number): void {
+  setBlocks(blocks: readonly TranscriptBlock[], revision: number, trimmedCount = 0): void {
     this.#blocks = blocks;
     this.#revision = revision;
+    this.#trimmedCount = trimmedCount;
   }
 
-  /** The wrapped lines at `width`, rebuilding only when blocks/width changed. */
+  #rebuild(width: number): void {
+    const theme = this.getTheme();
+    const w = Math.max(1, width);
+    const out: string[] = [];
+    const starts: number[] = [];
+    // The "history trimmed" marker is prefixed to the first block's region so
+    // that scrolling to the top (block 0, offset 0) reveals it.
+    if (this.#trimmedCount > 0) {
+      const label = `... ${this.#trimmedCount} earlier message${this.#trimmedCount === 1 ? "" : "s"} trimmed ...`;
+      for (const line of renderBlock({ kind: "meta", text: label }, w, theme)) out.push(line);
+    }
+    for (let i = 0; i < this.#blocks.length; i++) {
+      if (i > 0) out.push(""); // blank separator between blocks
+      starts.push(i === 0 ? 0 : out.length);
+      for (const line of renderBlock(this.#blocks[i]!, w, theme)) out.push(line);
+    }
+    this.#lines = out;
+    this.#blockStarts = starts;
+    this.#width = width;
+    this.#appliedRevision = this.#revision;
+    this.#appliedTrimmed = this.#trimmedCount;
+  }
+
+  /** The wrapped lines at `width`, rebuilding only when blocks/width/trim changed. */
   lines(width: number): string[] {
-    if (width !== this.#width || this.#revision !== this.#appliedRevision) {
-      this.#lines = renderBlocks(this.#blocks, width, this.getTheme());
-      this.#width = width;
-      this.#appliedRevision = this.#revision;
+    if (width !== this.#width || this.#revision !== this.#appliedRevision || this.#trimmedCount !== this.#appliedTrimmed) {
+      this.#rebuild(width);
     }
     return this.#lines;
+  }
+
+  /** Display-line index where local block `index` starts, at `width`. */
+  blockStart(index: number, width: number): number {
+    this.lines(width);
+    if (this.#blockStarts.length === 0) return 0;
+    const clamped = Math.min(Math.max(0, index), this.#blockStarts.length - 1);
+    return this.#blockStarts[clamped]!;
+  }
+
+  /** The (local block, line-within-block) that display line `line` falls in, at `width`. */
+  blockAtLine(line: number, width: number): { block: number; offset: number } {
+    this.lines(width);
+    const starts = this.#blockStarts;
+    if (starts.length === 0) return { block: 0, offset: Math.max(0, line) };
+    let lo = 0;
+    let hi = starts.length - 1;
+    let ans = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (starts[mid]! <= line) {
+        ans = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return { block: ans, offset: Math.max(0, line - starts[ans]!) };
   }
 }

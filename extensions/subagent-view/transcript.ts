@@ -17,7 +17,7 @@
  * This module is pure and UI-agnostic: it produces structured {@link TranscriptBlock}s.
  * Wrapping those into width-bounded display lines is the pager's job.
  */
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, BashExecutionMessage, BranchSummaryMessage, CompactionSummaryMessage, CustomMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 
 /** A single logical chunk of a transcript, in chronological / content order. */
@@ -130,6 +130,46 @@ export function messageToBlocks(message: AgentMessage | undefined): TranscriptBl
     const result = message as ToolResultMessage;
     const text = sanitize(contentText(result.content)).trim();
     blocks.push({ kind: "toolresult", label: result.toolName, text, isError: result.isError });
+    return blocks;
+  }
+
+  // A sub-agent's `bash` tool runs surface as a dedicated message role: render
+  // the command as a tool call and its output as a (possibly error) result.
+  if (role === "bashExecution") {
+    const bash = message as BashExecutionMessage;
+    const command = sanitize(bash.command).trim();
+    blocks.push({ kind: "toolcall", label: "bash", text: command });
+    const output = sanitize(bash.output).trim();
+    const isError = bash.cancelled || (typeof bash.exitCode === "number" && bash.exitCode !== 0);
+    const outcome = bash.cancelled ? "cancelled" : `exit ${bash.exitCode ?? "?"}`;
+    const body = bash.truncated && output ? `${output}\n…(truncated)` : output;
+    if (body || isError) blocks.push({ kind: "toolresult", label: `bash (${outcome})`, text: body, isError });
+    return blocks;
+  }
+
+  // Context-management markers: render as inert meta lines so the reader sees
+  // that a compaction/branch-return happened rather than silently losing turns.
+  if (role === "compactionSummary") {
+    const compaction = message as CompactionSummaryMessage;
+    const summary = sanitize(compaction.summary).trim();
+    const tokens = typeof compaction.tokensBefore === "number" ? ` (~${compaction.tokensBefore} tokens)` : "";
+    blocks.push({ kind: "meta", text: `context compacted${tokens}${summary ? `: ${summary}` : ""}` });
+    return blocks;
+  }
+
+  if (role === "branchSummary") {
+    const branch = message as BranchSummaryMessage;
+    const summary = sanitize(branch.summary).trim();
+    blocks.push({ kind: "meta", text: summary ? `returned from branch: ${summary}` : "returned from branch" });
+    return blocks;
+  }
+
+  // Custom messages (e.g. nested task results) — show only when display:true.
+  if (role === "custom") {
+    const custom = message as CustomMessage;
+    if (!custom.display) return blocks;
+    const text = sanitize(contentText(custom.content)).trim();
+    if (text) blocks.push({ kind: "meta", text: custom.customType ? `${custom.customType}: ${text}` : text });
     return blocks;
   }
 

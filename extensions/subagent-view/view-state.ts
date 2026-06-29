@@ -1,22 +1,52 @@
 /**
  * View-state controller for the sub-agent pager: which channel is selected,
- * per-channel scroll position, unread tracking, and the spinner
- * frame. The main agent is channel 0; sub-agents follow in registry order.
+ * per-channel scroll position, unread tracking, and the spinner frame. The main
+ * agent is channel 0; sub-agents follow in registry order.
  *
- * Kept separate from the lifecycle wiring (index.ts) and the frame composition
- * (split.ts) so it can be exercised headlessly by the smoke harness.
+ * Scroll position is stored as a logical {@link Anchor}, not a raw line index,
+ * so it survives re-wrapping on terminal resize:
+ *   - `tail`        — pinned to the newest output (default).
+ *   - `block`       — for sub-agent channels: an absolute block index + a line
+ *                     offset within that block. Re-derived from the re-wrapped
+ *                     {@link WrappedBuffer} each render, so the same content
+ *                     stays put across width changes and survives memory-cap
+ *                     trims (the absolute index accounts for trimmed blocks).
+ *   - `fromBottom`  — for the main channel (pi's native lines, no block model):
+ *                     a distance above the tail, preserved across resizes.
  *
- * @see ./scrollback.ts for the scroll primitives and WrappedBuffer.
+ * Kept separate from the lifecycle wiring (index.ts) and frame composition
+ * (frame.ts) so it can be exercised headlessly by the smoke harness.
+ *
+ * @see ./scrollback.ts for maxTop + the WrappedBuffer block↔line mapping.
  */
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { SubagentRegistry, SubagentSnapshot } from "./registry.ts";
-import { newScrollState, type ScrollState, scrollLines, scrollToBottom, scrollToTop, WrappedBuffer } from "./scrollback.ts";
+import { maxTop, WrappedBuffer } from "./scrollback.ts";
 
 export const MAIN_CHANNEL = "main";
 
+/** A resize-stable scroll position. */
+type Anchor =
+  | { kind: "tail" }
+  | { kind: "block"; blockAbs: number; offset: number }
+  | { kind: "fromBottom"; lines: number };
+
+interface ScrollState {
+  anchor: Anchor;
+}
+
+function newScrollState(): ScrollState {
+  return { anchor: { kind: "tail" } };
+}
+
+function clamp(value: number, lo: number, hi: number): number {
+  return Math.min(Math.max(value, lo), hi);
+}
+
 /** Encode an agent's output progress so we can detect "new since last viewed". */
 function revisionOf(agent: SubagentSnapshot): number {
-  return agent.blocks.length * 1_000_000 + agent.text.length + agent.thinking.length;
+  // Include trimmed blocks so the count stays monotonic across memory-cap trims.
+  return (agent.trimmedBlocks + agent.blocks.length) * 1_000_000 + agent.text.length + agent.thinking.length;
 }
 
 export class SubagentViewState {
@@ -32,6 +62,7 @@ export class SubagentViewState {
   // recomputing the frame geometry.
   #lastViewport = 1;
   #lastTotal = 0;
+  #lastWidth = 1;
 
   constructor(
     private readonly registry: SubagentRegistry,
@@ -56,7 +87,7 @@ export class SubagentViewState {
     return index < 0 ? 0 : index;
   }
 
-  scrollState(id: string): ScrollState {
+  #scrollState(id: string): ScrollState {
     let state = this.#scroll.get(id);
     if (!state) {
       state = newScrollState();
@@ -101,9 +132,10 @@ export class SubagentViewState {
   }
 
   /** Record the active channel's frame geometry so input handlers can scroll. */
-  rememberGeometry(total: number, viewport: number): void {
+  rememberGeometry(total: number, viewport: number, width: number): void {
     this.#lastTotal = total;
     this.#lastViewport = Math.max(1, viewport);
+    this.#lastWidth = Math.max(1, width);
   }
 
   /**
@@ -121,24 +153,68 @@ export class SubagentViewState {
     return { total: this.#lastTotal, viewport: this.#lastViewport, pageRows: this.pageRows() };
   }
 
+  /** Resolve the anchor to a concrete top display-line for the given geometry. */
+  windowTop(id: string, total: number, viewport: number, width: number): number {
+    const limit = maxTop(total, viewport);
+    const anchor = this.#scrollState(id).anchor;
+    switch (anchor.kind) {
+      case "tail":
+        return limit;
+      case "fromBottom":
+        return clamp(limit - anchor.lines, 0, limit);
+      case "block": {
+        const buffer = this.#buffers.get(id);
+        if (!buffer) return limit;
+        const local = anchor.blockAbs - this.#trimmedBlocks(id);
+        return clamp(buffer.blockStart(local, width) + anchor.offset, 0, limit);
+      }
+    }
+  }
+
+  #trimmedBlocks(id: string): number {
+    return this.registry.list().find((agent) => agent.id === id)?.trimmedBlocks ?? 0;
+  }
+
+  /** Re-anchor the selected channel to a concrete top line (tail when at bottom). */
+  #setTop(id: string, top: number): void {
+    const state = this.#scrollState(id);
+    const limit = maxTop(this.#lastTotal, this.#lastViewport);
+    if (top >= limit) {
+      state.anchor = { kind: "tail" };
+      return;
+    }
+    const clamped = Math.max(0, top);
+    if (id === MAIN_CHANNEL) {
+      state.anchor = { kind: "fromBottom", lines: limit - clamped };
+      return;
+    }
+    const buffer = this.#buffers.get(id);
+    if (!buffer) {
+      state.anchor = { kind: "fromBottom", lines: limit - clamped };
+      return;
+    }
+    const { block, offset } = buffer.blockAtLine(clamped, this.#lastWidth);
+    state.anchor = { kind: "block", blockAbs: this.#trimmedBlocks(id) + block, offset };
+  }
+
   scrollActive(delta: number): void {
-    scrollLines(this.scrollState(this.#selectedId), delta, this.#lastTotal, this.#lastViewport);
+    const id = this.#selectedId;
+    const current = this.windowTop(id, this.#lastTotal, this.#lastViewport, this.#lastWidth);
+    this.#setTop(id, current + delta);
   }
 
   scrollActiveToTop(): void {
-    scrollToTop(this.scrollState(this.#selectedId), this.#lastTotal, this.#lastViewport);
+    this.#setTop(this.#selectedId, 0);
   }
 
   scrollActiveToBottom(): void {
-    scrollToBottom(this.scrollState(this.#selectedId));
+    this.#scrollState(this.#selectedId).anchor = { kind: "tail" };
   }
 
   /** True while the active channel is scrolled off its live tail. */
   activeIsScrolled(): boolean {
-    const state = this.scrollState(this.#selectedId);
-    if (state.followTail) return false;
-    const limit = Math.max(0, this.#lastTotal - this.#lastViewport);
-    return Math.min(Math.max(0, state.top), limit) < limit;
+    const top = this.windowTop(this.#selectedId, this.#lastTotal, this.#lastViewport, this.#lastWidth);
+    return maxTop(this.#lastTotal, this.#lastViewport) - top > 0;
   }
 
   /**
@@ -182,5 +258,6 @@ export class SubagentViewState {
     this.#newOutput.clear();
     this.#lastViewport = 1;
     this.#lastTotal = 0;
+    this.#lastWidth = 1;
   }
 }

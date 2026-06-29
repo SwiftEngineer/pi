@@ -17,7 +17,7 @@
  */
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { composeFrame, maxTop, resolveTop } from "./scrollback.ts";
+import { composeFrame, maxTop } from "./scrollback.ts";
 import { type SubagentRegistry, type SubagentSnapshot, subagentRegistry } from "./registry.ts";
 import { bannerLine, type ChannelActivity, renderStrip, type StripChannel, type StripModel } from "./strip.ts";
 import { MAIN_CHANNEL, type SubagentViewState } from "./view-state.ts";
@@ -124,6 +124,7 @@ function buildStripModel(
   ascii: boolean,
   total: number,
   viewport: number,
+  top: number,
 ): StripModel {
   const agents = registry.list();
   const channels: StripChannel[] = [
@@ -140,10 +141,9 @@ function buildStripModel(
   const selected = isMain ? undefined : agents.find((agent) => agent.id === state.selectedId);
   const spinner = !isMain && (selected?.state === "running" || selected?.state === "pending");
 
-  const scroll = state.scrollState(state.selectedId);
-  const top = resolveTop(scroll, total, viewport);
   const limit = maxTop(total, viewport);
-  const below = limit - top;
+  const clampedTop = Math.min(Math.max(0, top), limit);
+  const below = limit - clampedTop;
 
   return {
     channels,
@@ -154,7 +154,7 @@ function buildStripModel(
     spinner,
     spinnerFrame: state.spinnerFrame,
     scrolledUp: below > 0,
-    percent: limit > 0 ? Math.round((top / limit) * 100) : 100,
+    percent: limit > 0 ? Math.round((clampedTop / limit) * 100) : 100,
     linesBelow: below,
     ascii,
   };
@@ -173,7 +173,7 @@ export function statusStripLines(
   registry: SubagentRegistry = subagentRegistry,
 ): string[] {
   if (registry.isEmpty()) return [];
-  return renderStrip(buildStripModel(registry, state, theme, ascii, 0, 1), width, theme, rows);
+  return renderStrip(buildStripModel(registry, state, theme, ascii, 0, 1, 0), width, theme, rows);
 }
 
 /**
@@ -214,14 +214,15 @@ export function composePagerFrame(tui: FrameTui, mainLines: string[], width: num
     windowLines = mainLines.slice(0, Math.max(0, mainLines.length - nativeChrome));
   } else {
     const buffer = state.buffer(agent.id);
-    buffer.setBlocks(agent.blocks, agent.blocks.length);
+    buffer.setBlocks(agent.blocks, agent.blocks.length, agent.trimmedBlocks);
     windowLines = [...buffer.lines(width), ...liveLines(agent, width, theme)];
   }
 
   const viewport = Math.max(1, height - chromeRows - stripRows);
-  state.rememberGeometry(windowLines.length, viewport);
+  state.rememberGeometry(windowLines.length, viewport, width);
 
-  const stripModel = buildStripModel(registry, state, theme, deps.ascii, windowLines.length, viewport);
+  const top = state.windowTop(state.selectedId, windowLines.length, viewport, width);
+  const stripModel = buildStripModel(registry, state, theme, deps.ascii, windowLines.length, viewport, top);
   const stripLines = renderStrip(stripModel, width, theme, stripRows);
 
   return composeFrame({
@@ -230,7 +231,7 @@ export function composePagerFrame(tui: FrameTui, mainLines: string[], width: num
     stripLines,
     width,
     height,
-    scroll: state.scrollState(state.selectedId),
+    top,
     banner: (below, bannerWidth) => bannerLine(below, bannerWidth, theme, deps.ascii),
   });
 }
