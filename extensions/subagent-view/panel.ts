@@ -14,6 +14,7 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { SubagentRegistry, SubagentSnapshot } from "./registry.ts";
+import { blocksToText } from "./transcript.ts";
 
 /** Minimal structural view of the TUI we need (terminal size, repaint, re-render). */
 export interface TuiLike {
@@ -204,15 +205,13 @@ export class SubagentPanel implements Component {
     const statusGlyph = running ? theme.fg("warning", spinnerFrame()) : theme.fg("muted", "•");
     header.push(`${statusGlyph} ${theme.fg("muted", stateLabel(watched))}`);
 
-    // When finished, prefer the final result; otherwise show the live stream.
-    let bodyText: string;
-    if ((watched.state === "done" || watched.state === "error") && watched.final) {
-      bodyText = watched.final;
-    } else if (watched.text) {
-      bodyText = watched.text;
-    } else if (watched.thinking) {
-      bodyText = theme.fg("dim", watched.thinking);
-    } else {
+    // Show the full append-only transcript (history) followed by any in-flight
+    // streaming text. History is never truncated, so reasoning no longer
+    // vanishes mid-stream the way the old rolling-tail panel did.
+    const history = blocksToText(watched.blocks);
+    const liveText = watched.text || (watched.thinking ? theme.fg("dim", watched.thinking) : "");
+    let bodyText = [history, liveText].filter(Boolean).join("\n\n");
+    if (!bodyText) {
       bodyText = theme.fg("dim", running ? "working…" : "(no output)");
     }
 

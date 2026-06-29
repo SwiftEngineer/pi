@@ -7,6 +7,8 @@
  * registry is a process-wide singleton (stashed on `globalThis` to survive any
  * double-evaluation by the jiti extension loader).
  */
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { messageToBlocks, type TranscriptBlock } from "./transcript.ts";
 
 /** Lifecycle state of a single sub-agent. */
 export type SubagentState = "pending" | "running" | "done" | "error";
@@ -27,6 +29,8 @@ export interface SubagentSnapshot {
   readonly text: string;
   /** Rolling tail of streamed thinking for the current message. */
   readonly thinking: string;
+  /** Append-only finalized transcript (full history), built from `message_end`. */
+  readonly blocks: readonly TranscriptBlock[];
   /** Final result text once the sub-agent finishes. */
   readonly final: string | undefined;
   /** Outcome label once finished, e.g. "completed" / "failed (1)" / "timed out". */
@@ -75,6 +79,7 @@ interface SubagentRecord {
   tool: string | undefined;
   text: string;
   thinking: string;
+  blocks: TranscriptBlock[];
   final: string | undefined;
   exitInfo: string | undefined;
   startedAt: number;
@@ -91,6 +96,7 @@ function snapshot(record: SubagentRecord): SubagentSnapshot {
     tool: record.tool,
     text: record.text,
     thinking: record.thinking,
+    blocks: record.blocks,
     final: record.final,
     exitInfo: record.exitInfo,
     startedAt: record.startedAt,
@@ -142,6 +148,7 @@ export class SubagentRegistry {
       tool: undefined,
       text: "",
       thinking: "",
+      blocks: [],
       final: undefined,
       exitInfo: undefined,
       startedAt: now,
@@ -177,6 +184,21 @@ export class SubagentRegistry {
     if (patch.appendThinking) {
       record.thinking = tailBytes(record.thinking + patch.appendThinking, MAX_LIVE_TEXT_BYTES);
     }
+    this.#notify();
+  }
+
+  /**
+   * Append a finalized message to the channel's append-only transcript.
+   * Driven by `message_end` (main session) or the reconstructed `message_end`
+   * events of a child `pi --mode json` stream (sub-agents). Unlike the live
+   * `text`/`thinking` tail, this is never truncated, so full history survives.
+   */
+  appendMessage(id: string, message: AgentMessage): void {
+    const record = this.#records.get(id);
+    if (!record) return;
+    const blocks = messageToBlocks(message);
+    if (blocks.length === 0) return;
+    record.blocks.push(...blocks);
     this.#notify();
   }
 

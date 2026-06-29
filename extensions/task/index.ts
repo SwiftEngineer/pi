@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { type SubagentFinish, type SubagentLiveUpdate, subagentRegistry } from "../subagent-view/registry.ts";
 
 const MAX_CONCURRENCY = positiveIntFromEnv("PI_TASK_MAX_CONCURRENCY", 4);
@@ -277,7 +278,7 @@ function killChild(child: { pid?: number | undefined; kill(signal: NodeJS.Signal
   }
 }
 
-async function runSubtask(ctxCwd: string, agent: string, context: string | undefined, task: TaskParamsType["tasks"][number], signal: AbortSignal | undefined, onLive?: (update: SubagentLiveUpdate) => void): Promise<SubtaskResult> {
+async function runSubtask(ctxCwd: string, agent: string, context: string | undefined, task: TaskParamsType["tasks"][number], signal: AbortSignal | undefined, onLive?: (update: SubagentLiveUpdate) => void, onMessage?: (message: AgentMessage) => void): Promise<SubtaskResult> {
   const config = AGENT_PROMPTS[agent] ?? AGENT_PROMPTS.task;
   if (!config) throw new Error("Built-in task agent prompt is missing.");
   const assignment = context ? `${context}\n\n${task.assignment}` : task.assignment;
@@ -310,6 +311,11 @@ async function runSubtask(ctxCwd: string, agent: string, context: string | undef
     if (!event) return;
     const text = assistantTextFromMessageEnd(event);
     if (text) finalText.reset(text);
+    // Capture every finalized message into the append-only transcript (full
+    // history), separate from the lossy live tail that drives the spinner.
+    if (onMessage && event.type === "message_end" && isObject(event.message)) {
+      onMessage(event.message as unknown as AgentMessage);
+    }
     if (onLive) {
       const update = liveFromEvent(event);
       if (update) onLive(update);
@@ -452,8 +458,9 @@ export default function (pi: ExtensionAPI) {
         const registryId = registryIds.get(task.id);
         if (registryId) subagentRegistry.start(registryId);
         const update = registryId ? (patch: SubagentLiveUpdate) => subagentRegistry.update(registryId, patch) : undefined;
+        const onMessage = registryId ? (message: AgentMessage) => subagentRegistry.appendMessage(registryId, message) : undefined;
         try {
-          const result = await runSubtask(ctx.cwd, params.agent, params.context, task, signal, update);
+          const result = await runSubtask(ctx.cwd, params.agent, params.context, task, signal, update, onMessage);
           if (registryId) subagentRegistry.finish(registryId, finishFromResult(result));
           return result;
         } catch (error) {
