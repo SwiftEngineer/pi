@@ -430,22 +430,101 @@ function render(results: SubtaskResult[]): string {
   return truncateInline(text);
 }
 
+function renderStarted(jobId: string, params: TaskParamsType): string {
+  const count = params.tasks.length;
+  const labels = params.tasks.map((task) => `- ${task.id}: ${task.description}`).join("\n");
+  return [
+    `Started ${count} background sub-agent${count === 1 ? "" : "s"} (${jobId}).`,
+    "The top-level conversation can continue while they run; results will be sent back automatically when finished.",
+    labels,
+  ].join("\n");
+}
+
+function renderFinal(jobId: string, results: SubtaskResult[]): string {
+  const failed = results.filter((result) => result.exitCode !== 0).length;
+  const status = failed === 0 ? "completed" : `${failed}/${results.length} failed`;
+  return truncateInline(`Background sub-agents ${jobId} ${status}.\n\n${render(results)}`);
+}
+
+type BackgroundBatch = {
+  controller: AbortController;
+  startedAt: number;
+};
+
+const backgroundBatches = new Map<string, BackgroundBatch>();
+
+async function runBackgroundBatch(
+  pi: ExtensionAPI,
+  ctxCwd: string,
+  jobId: string,
+  params: TaskParamsType,
+  registryIds: Map<string, string>,
+  controller: AbortController,
+): Promise<void> {
+  try {
+    const results = await mapLimit(params.tasks, MAX_CONCURRENCY, async (task) => {
+      const registryId = registryIds.get(task.id);
+      if (registryId) subagentRegistry.start(registryId);
+      const update = registryId ? (patch: SubagentLiveUpdate) => subagentRegistry.update(registryId, patch) : undefined;
+      const onMessage = registryId ? (message: AgentMessage) => subagentRegistry.appendMessage(registryId, message) : undefined;
+      try {
+        const result = await runSubtask(ctxCwd, params.agent, params.context, task, controller.signal, update, onMessage);
+        if (registryId) subagentRegistry.finish(registryId, finishFromResult(result));
+        return result;
+      } catch (error) {
+        const failed = failedResult(task, error);
+        if (registryId) subagentRegistry.finish(registryId, { state: "error", final: failed.finalText, exitInfo: "failed" });
+        return failed;
+      }
+    });
+    if (!backgroundBatches.has(jobId)) return;
+    const failed = results.some((result) => result.exitCode !== 0);
+    pi.sendMessage({
+      customType: "subagent-results",
+      display: true,
+      content: renderFinal(jobId, results),
+      details: {
+        jobId,
+        agent: params.agent,
+        results,
+        failed,
+        completedAt: Date.now(),
+      },
+    }, { triggerTurn: true, deliverAs: "followUp" });
+  } finally {
+    backgroundBatches.delete(jobId);
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "task",
     label: "Task",
-    description: "Run one or more independent subagents in parallel using isolated Pi processes with bounded runtime and output.",
-    promptSnippet: "task — bounded parallel subagents with isolated context.",
+    description: "Start one or more independent background subagents in parallel using isolated Pi processes with bounded runtime and output. Returns immediately; results are delivered back automatically.",
+    promptSnippet: "task — bounded background subagents with isolated context.",
     promptGuidelines: [
-      "Use task for independent subtasks; assignments must be self-contained and subagents must skip project-wide gates/formatters.",
+      "Use task for independent background subtasks; assignments must be self-contained and subagents must skip project-wide gates/formatters.",
+      "The tool returns immediately. Continue the conversation normally; when sub-agents finish, their results are delivered automatically as a follow-up message.",
       "Task output and runtime are bounded; split work narrowly instead of launching broad open-ended agents.",
     ],
     parameters: TaskParams,
     executionMode: "parallel",
     async execute(toolCallId, params: TaskParamsType, signal, _onUpdate, ctx) {
       if (params.tasks.length === 0) {
-        return { content: [{ type: "text", text: "No tasks supplied." }], details: { results: [] } };
+        return { content: [{ type: "text", text: "No tasks supplied." }], details: { background: true, results: [] } };
       }
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Task start aborted before any sub-agents were launched." }], details: { background: true, aborted: true, results: [] }, terminate: true };
+      }
+
+      // Keep active background agents visible across top-level turns. Once no
+      // background agents are running, a new task call starts a fresh panel.
+      if (subagentRegistry.counts().running === 0) subagentRegistry.reset();
+
+      const jobId = `subagents:${toolCallId}`;
+      const controller = new AbortController();
+      backgroundBatches.set(jobId, { controller, startedAt: Date.now() });
+
       // Register every sub-agent up front so the live panel shows all of them
       // (including queued ones) as soon as the tool call begins.
       const registryIds = new Map<string, string>();
@@ -454,23 +533,39 @@ export default function (pi: ExtensionAPI) {
         registryIds.set(task.id, id);
         subagentRegistry.add(id, task.description, params.agent);
       }
-      const results = await mapLimit(params.tasks, MAX_CONCURRENCY, async (task) => {
-        const registryId = registryIds.get(task.id);
-        if (registryId) subagentRegistry.start(registryId);
-        const update = registryId ? (patch: SubagentLiveUpdate) => subagentRegistry.update(registryId, patch) : undefined;
-        const onMessage = registryId ? (message: AgentMessage) => subagentRegistry.appendMessage(registryId, message) : undefined;
-        try {
-          const result = await runSubtask(ctx.cwd, params.agent, params.context, task, signal, update, onMessage);
-          if (registryId) subagentRegistry.finish(registryId, finishFromResult(result));
-          return result;
-        } catch (error) {
-          const failed = failedResult(task, error);
-          if (registryId) subagentRegistry.finish(registryId, { state: "error", final: failed.finalText, exitInfo: "failed" });
-          return failed;
+
+      void runBackgroundBatch(pi, ctx.cwd, jobId, params, registryIds, controller).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        for (const task of params.tasks) {
+          const registryId = registryIds.get(task.id);
+          if (registryId) subagentRegistry.finish(registryId, { state: "error", final: message, exitInfo: "failed" });
         }
+        const stillActive = backgroundBatches.has(jobId);
+        backgroundBatches.delete(jobId);
+        if (!stillActive) return;
+        pi.sendMessage({
+          customType: "subagent-results",
+          display: true,
+          content: `Background sub-agents ${jobId} failed before producing results.\n\n${message}`,
+          details: { jobId, agent: params.agent, failed: true, error: message, completedAt: Date.now() },
+        }, { triggerTurn: true, deliverAs: "followUp" });
       });
-      const failed = results.some((result) => result.exitCode !== 0);
-      return { content: [{ type: "text", text: render(results) }], details: { results }, terminate: failed };
+
+      return {
+        content: [{ type: "text", text: renderStarted(jobId, params) }],
+        details: {
+          background: true,
+          jobId,
+          agent: params.agent,
+          taskIds: params.tasks.map((task) => task.id),
+          startedAt: backgroundBatches.get(jobId)?.startedAt,
+        },
+      };
     },
+  });
+
+  pi.on("session_shutdown", () => {
+    for (const batch of backgroundBatches.values()) batch.controller.abort();
+    backgroundBatches.clear();
   });
 }

@@ -29,13 +29,23 @@ function execCommand(command, args, options = {}) {
   return completion.promise;
 }
 
+async function waitFor(predicate, timeoutMs = 1000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const value = predicate();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("timed out waiting for smoke condition");
+}
+
 const pi = {
   registerTool(tool) { tools.set(tool.name, tool); },
   registerCommand(name, command) { commands.set(name, command); },
   registerMessageRenderer(type, renderer) { renderers.set(type, renderer); },
   registerShortcut(shortcut, options) { shortcuts.set(shortcut, options); },
   on(event, handler) { handlers.push({ event, handler }); },
-  sendMessage(message) { sentMessages.push(message); },
+  sendMessage(message, options) { sentMessages.push({ ...message, options }); },
   exec: execCommand,
   getActiveTools() { return Array.from(tools.keys()); },
   getAllTools() {
@@ -82,15 +92,26 @@ try {
   if (!cappedSearchText.includes("line truncated")) throw new Error("search long-line truncation smoke failed");
 
   const fakePi = path.join(smokeTmp, "fake-pi.mjs");
-  await writeFile(fakePi, "#!/usr/bin/env node\nsetTimeout(() => {}, 60_000);\n", "utf8");
+  await writeFile(fakePi, `#!/usr/bin/env node
+const event = {
+  type: "message_end",
+  message: { role: "assistant", content: [{ type: "text", text: "background result" }] },
+};
+console.log(JSON.stringify(event));
+`, "utf8");
   await chmod(fakePi, 0o755);
   const previousPiCommand = process.env.SWIFT_PI_COMMAND;
   process.env.SWIFT_PI_COMMAND = fakePi;
   try {
     const task = tools.get("task");
-    const taskResult = await task.execute("smoke-task-timeout", { agent: "task", tasks: [{ id: "Timeout", description: "Timeout", assignment: "Hang" }] }, undefined, undefined, ctx);
-    if (!taskResult.content[0].text.includes("timed out")) throw new Error("task timeout smoke failed");
-    if (taskResult.details.results[0].exitCode !== 124 || taskResult.details.results[0].timedOut !== true) throw new Error("task timeout details smoke failed");
+    const sentStart = sentMessages.length;
+    const taskResult = await task.execute("smoke-task-background", { agent: "task", tasks: [{ id: "Background", description: "Background", assignment: "Run" }] }, undefined, undefined, ctx);
+    if (!taskResult.content[0].text.includes("Started 1 background sub-agent")) throw new Error("task background start smoke failed");
+    if (taskResult.details.background !== true || taskResult.details.jobId !== "subagents:smoke-task-background") throw new Error("task background details smoke failed");
+    const finalMessage = await waitFor(() => sentMessages.slice(sentStart).find((message) => message.customType === "subagent-results"));
+    if (!finalMessage.content.includes("background result")) throw new Error("task background final message smoke failed");
+    if (finalMessage.options?.triggerTurn !== true || finalMessage.options?.deliverAs !== "followUp") throw new Error("task background final delivery smoke failed");
+    if (finalMessage.details.results[0].exitCode !== 0) throw new Error("task background result details smoke failed");
   } finally {
     if (previousPiCommand === undefined) delete process.env.SWIFT_PI_COMMAND;
     else process.env.SWIFT_PI_COMMAND = previousPiCommand;
@@ -418,6 +439,151 @@ if (!patchedTui.includes("globalThis.__piSplitFrame(this, newLines, width, heigh
 if (!patchedTui.includes("globalThis.__PI_SPLIT_PATCH__ = true;")) throw new Error("tui patch flag smoke failed");
 if (patchTuiSource(patchedTui) !== patchedTui) throw new Error("tui patch idempotence smoke failed");
 if (unpatchTuiSource(patchedTui) !== tuiSample) throw new Error("tui patch reversibility smoke failed");
+
+// Native scrollback patch: source idempotence, transcript finalization, and no clear-on-shrink during live updates.
+const {
+  TRANSCRIPT_CONTAINER_SOURCE,
+  applyNativeScrollbackFrameForTest,
+  patchInteractiveModeSource,
+  patchNativeScrollbackTuiSource,
+  patchToolExecutionSource,
+} = await import(pathToFileURL(path.join(root, "scripts/patch-pi-scrollback.mjs")).href);
+const scrollbackTuiSample = [
+  "export class TUI {",
+  "    previousLines = [];",
+  "    previousKittyImageIds = new Set();",
+  "    previousWidth = 0;",
+  "    previousHeight = 0;",
+  "    cursorRow = 0;",
+  "    hardwareCursorRow = 0;",
+  "    clearOnShrink = true;",
+  "    maxLinesRendered = 0;",
+  "    previousViewportTop = 0; // Track previous viewport top for resize-aware cursor moves",
+  "    requestRender(force = false) {",
+  "        if (force) {",
+  "            this.previousLines = [];",
+  "            this.previousWidth = -1; // -1 triggers widthChanged, forcing a full clear",
+  "            this.previousHeight = -1; // -1 triggers heightChanged, forcing a full clear",
+  "            this.cursorRow = 0;",
+  "        }",
+  "    }",
+  "    collectKittyImageIds(lines) { return new Set(); }",
+  "    render(width) { return []; }",
+  "    /** Composite all overlays into content lines (sorted by focusOrder, higher = on top). */",
+  "    compositeOverlays(lines, width, height) { return lines; }",
+  "    extractCursorPosition(lines, height) { return null; }",
+  "    applyLineResets(lines) { return lines; }",
+  "    doRender() {",
+  "        const width = this.terminal.columns;",
+  "        const height = this.terminal.rows;",
+  "        const widthChanged = this.previousWidth !== 0 && this.previousWidth !== width;",
+  "        const heightChanged = this.previousHeight !== 0 && this.previousHeight !== height;",
+  "        const previousBufferLength = this.previousHeight > 0 ? this.previousViewportTop + this.previousHeight : height;",
+  "        let prevViewportTop = heightChanged ? Math.max(0, previousBufferLength - height) : this.previousViewportTop;",
+  "        let viewportTop = prevViewportTop;",
+  "        let hardwareCursorRow = this.hardwareCursorRow;",
+  "        // Render all components to get new lines",
+  "        let newLines = this.render(width);",
+  "        // Composite overlays into the rendered lines (before differential compare)",
+  "        if (this.overlayStack.length > 0) {",
+  "            newLines = this.compositeOverlays(newLines, width, height);",
+  "        }",
+  "        // Extract cursor position before applying line resets (marker must be found first)",
+  "        const cursorPos = this.extractCursorPosition(newLines, height);",
+  "        newLines = this.applyLineResets(newLines);",
+  "        if (this.clearOnShrink && newLines.length < this.maxLinesRendered && this.overlayStack.length === 0) {",
+  "            fullRender(true);",
+  "        }",
+  "    }",
+  "}",
+  "//# sourceMappingURL=tui.js.map",
+  "",
+].join("\n");
+const scrollbackPatchedTui = patchNativeScrollbackTuiSource(scrollbackTuiSample);
+if (patchNativeScrollbackTuiSource(scrollbackPatchedTui) !== scrollbackPatchedTui) throw new Error("native scrollback tui patch idempotence smoke failed");
+if (!scrollbackPatchedTui.includes("this.nativeScrollbackCommittedRows === 0 && newLines.length < this.maxLinesRendered")) throw new Error("native scrollback clearOnShrink guard smoke failed");
+if (scrollbackPatchedTui.indexOf("applyNativeScrollbackFrame") > scrollbackPatchedTui.indexOf("Extract cursor position")) throw new Error("native scrollback frame application order smoke failed");
+
+const toolExecutionSample = [
+  "class ToolExecutionComponent {",
+  "    hideComponent = false;",
+  "    constructor(toolName, toolCallId, args, options = {}, toolDefinition, ui, cwd) {",
+  "        this.ui = ui;",
+  "        this.cwd = cwd;",
+  "        this.addChild(new Spacer(1));",
+  "    }",
+  "    updateResult(result, isPartial = false) {",
+  "        this.result = result;",
+  "        this.isPartial = isPartial;",
+  "        this.updateDisplay();",
+  "        this.maybeConvertImagesForKitty();",
+  "    }",
+  "    render(width) {",
+  "        if (this.hideComponent) return [];",
+  "        const contentLines = this.selfRenderContainer.render(width);",
+  "        const lines = [];",
+  "            if (contentLines.length > 0) {",
+  "                lines.push(\"\");",
+  "                lines.push(...contentLines);",
+  "            }",
+  "        return lines;",
+  "    }",
+  "}",
+].join("\n");
+const patchedToolExecution = patchToolExecutionSource(toolExecutionSample);
+if (patchToolExecutionSource(patchedToolExecution) !== patchedToolExecution) throw new Error("tool execution patch idempotence smoke failed");
+if (!patchedToolExecution.includes("markFinal") || patchedToolExecution.includes("this.addChild(new Spacer(1));")) throw new Error("tool execution live/final spacing smoke failed");
+
+const interactiveModeSample = [
+  "import { ToolExecutionComponent } from \"./components/tool-execution.js\";",
+  "class InteractiveMode {",
+  "  constructor() {",
+  "        this.chatContainer = new Container();",
+  "  }",
+  "  f(content, event) {",
+  "                    this.chatContainer.addChild(this.streamingComponent);",
+  "                    this.streamingComponent.updateContent(this.streamingMessage);",
+  "    new ToolExecutionComponent(content.name, content.id, content.arguments, {}, this.getRegisteredToolDefinition(content.name), this.ui, this.sessionManager.getCwd());",
+  "    new ToolExecutionComponent(event.toolName, event.toolCallId, event.args, {}, this.getRegisteredToolDefinition(event.toolName), this.ui, this.sessionManager.getCwd());",
+  "                    this.streamingComponent = undefined;",
+  "                    this.streamingMessage = undefined;",
+  "                    this.footer.invalidate();",
+  "            this.chatContainer.addChild(this.streamingComponent);",
+  "        }",
+  "        this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? \"hidden\" : \"visible\"}`);",
+  "  }",
+  "}",
+].join("\n");
+const patchedInteractiveMode = patchInteractiveModeSource(interactiveModeSample);
+if (patchInteractiveModeSource(patchedInteractiveMode) !== patchedInteractiveMode) throw new Error("interactive mode scrollback patch idempotence smoke failed");
+if (!patchedInteractiveMode.includes("new TranscriptContainer()") || patchedInteractiveMode.includes("this.ui, this.sessionManager.getCwd());")) throw new Error("interactive mode transcript wiring smoke failed");
+
+const transcriptTestSource = TRANSCRIPT_CONTAINER_SOURCE.replace(
+  'import { Container } from "@earendil-works/pi-tui";',
+  'class Container { constructor() { this.children = []; } addChild(c) { this.children.push(c); } removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); } clear() { this.children = []; } }',
+);
+const { TranscriptContainer } = await import(`data:text/javascript,${encodeURIComponent(transcriptTestSource)}`);
+const transcript = new TranscriptContainer();
+const stableChild = { render() { return ["stable"]; } };
+const liveTool = { render() { return ["tool", "tail"]; }, transcriptWantsLeadingSpacer() { return true; } };
+transcript.addChild(stableChild);
+transcript.addChild(liveTool);
+transcript.markLive(liveTool);
+if (transcript.getNativeScrollbackStableLineCount(80) !== 1) throw new Error("transcript live-prefix smoke failed");
+transcript.markFinal(liveTool);
+if (transcript.getNativeScrollbackStableLineCount(80) !== 4) throw new Error("transcript finalization smoke failed");
+
+const nativeState = {
+  nativeScrollbackCommittedRows: 0,
+  previousLines: Array.from({ length: 60 }, (_, i) => `old ${i}`),
+  cursorRow: 59,
+  hardwareCursorRow: 59,
+  previousViewportTop: 50,
+  maxLinesRendered: 60,
+};
+const managedLines = applyNativeScrollbackFrameForTest(nativeState, Array.from({ length: 60 }, (_, i) => `new ${i}`), 50, 10);
+if (managedLines.length !== 10 || nativeState.nativeScrollbackCommittedRows !== 50 || nativeState.maxLinesRendered !== 10) throw new Error("native scrollback viewport-tail smoke failed");
+if (nativeState.maxLinesRendered > managedLines.length) throw new Error("native scrollback live tool update would trigger clear-on-shrink smoke failed");
 
 for (const required of ["search", "ast_grep", "ast_edit", "todo_write", "ask", "web_search", "task"]) {
   if (!tools.has(required)) throw new Error(`missing tool: ${required}`);
