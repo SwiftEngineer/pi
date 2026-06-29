@@ -342,6 +342,16 @@ for (const shortcut of ["alt+]", "alt+[", "alt+l", "alt+s", "alt+a"]) {
   if (!shortcuts.has(shortcut)) throw new Error(`subagent-view shortcut missing: ${shortcut}`);
 }
 
+// Double-scroll guard: under the kitty keyboard protocol a key RELEASE for PgUp
+// still satisfies matchesKey("pageUp"), so the input handler must skip releases
+// (via isKeyRelease) — otherwise every press scrolls twice (one press jumped
+// ~2x a page, blowing past the buffer). Pin that contract here.
+const { isKeyRelease: isKeyReleaseFn, matchesKey: matchesKeyFn } = await import("@earendil-works/pi-tui");
+const pgUpRelease = "\x1b[5;1:3~";
+if (!matchesKeyFn(pgUpRelease, "pageUp")) throw new Error("pageUp release no longer matches pageUp — revisit double-scroll guard");
+if (!isKeyReleaseFn(pgUpRelease)) throw new Error("pageUp release not detected as key release — double-scroll guard broken");
+if (isKeyReleaseFn("\x1b[5~")) throw new Error("pageUp press misdetected as key release");
+
 // --- registry: append-only transcript keeps full history (not a rolling tail) ---
 subagentRegistry.reset();
 subagentRegistry.add("call:One", "explore auth", "explore");

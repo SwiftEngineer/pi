@@ -23,7 +23,7 @@ import { appendFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, matchesKey, type OverlayHandle, type OverlayOptions } from "@earendil-works/pi-tui";
+import { type Component, isKeyRelease, matchesKey, type OverlayHandle, type OverlayOptions } from "@earendil-works/pi-tui";
 import { composePagerFrame, type FrameTui, statusStripLines } from "./frame.ts";
 import { subagentRegistry } from "./registry.ts";
 import { SubagentViewState } from "./view-state.ts";
@@ -125,6 +125,11 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
     if (removeInput || typeof ctx.ui.onTerminalInput !== "function") return;
     removeInput = ctx.ui.onTerminalInput((data) => {
       if (subagentRegistry.isEmpty()) return undefined;
+      // Extension input listeners run before pi-tui filters key releases for the
+      // focused component, so under the kitty keyboard protocol every press is
+      // delivered twice (press + release). Acting on both would double every
+      // scroll — ignore the release and handle only the press.
+      if (isKeyRelease(data)) return undefined;
       const view = getState();
       const scroll = (delta: number): { consume: true } => {
         view.scrollActive(delta);
