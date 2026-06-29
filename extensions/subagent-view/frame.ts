@@ -43,15 +43,28 @@ export interface ComposeDeps {
   registry?: SubagentRegistry;
 }
 
+/** The pinned bottom chrome, split at the editor so the prompt can be hidden. */
+export interface Chrome {
+  /** The editor child's lines (carry the cursor marker). Shown only on the main channel. */
+  editorLines: string[];
+  /** Children rendered below the editor (widgets + powerline footer). Always pinned. */
+  belowLines: string[];
+}
+
 /**
- * Render the pinned chrome (editor + footer) by walking `children` from the end
- * until the editor (cursor marker) is found. Returns null when no marker is
- * present, so the caller can safely fall back to an unmodified frame.
+ * Walk `children` from the end until the editor (cursor marker) is found,
+ * splitting the bottom chrome into the editor and everything rendered below it
+ * (the powerline footer). Returns null when no marker is present, so the caller
+ * can safely fall back to an unmodified frame.
+ *
+ * The split lets the pager hide the prompt while viewing a sub-agent: dropping
+ * `editorLines` removes the only cursor marker from the frame, so pi-tui hides
+ * the hardware cursor — exactly the behaviour we want off the main channel.
  */
-export function extractChrome(tui: FrameTui, width: number): string[] | null {
+export function extractChrome(tui: FrameTui, width: number): Chrome | null {
   const children = tui.children;
   if (!children || children.length === 0) return null;
-  let chrome: string[] = [];
+  const belowLines: string[] = [];
   let rows = 0;
   for (let i = children.length - 1; i >= 0; i--) {
     let lines: string[];
@@ -60,9 +73,9 @@ export function extractChrome(tui: FrameTui, width: number): string[] | null {
     } catch {
       return null;
     }
-    chrome = [...lines, ...chrome];
+    if (lines.some((line) => line.includes(CURSOR_MARKER))) return { editorLines: lines, belowLines };
+    belowLines.unshift(...lines);
     rows += lines.length;
-    if (lines.some((line) => line.includes(CURSOR_MARKER))) return chrome;
     // The chrome can't be taller than the screen; if we've passed that without
     // finding the editor, bail to a safe passthrough rather than guess.
     if (rows > tui.terminal.rows) return null;
@@ -137,6 +150,7 @@ function buildStripModel(
     selectedIndex: state.selectedIndex(),
     selectedLabel: isMain ? "main" : (selected?.label ?? ""),
     selectedStatus: isMain ? "" : selected ? statusWord(selected) : "",
+    offMain: !isMain,
     spinner,
     spinnerFrame: state.spinnerFrame,
     scrolledUp: below > 0,
@@ -171,28 +185,37 @@ export function composePagerFrame(tui: FrameTui, mainLines: string[], width: num
   const registry = deps.registry ?? subagentRegistry;
   if (registry.isEmpty() || width < 1 || height < 1) return mainLines;
 
-  const chromeLines = extractChrome(tui, width);
-  if (!chromeLines) return mainLines;
-  const chromeRows = chromeLines.length;
+  const chrome = extractChrome(tui, width);
+  if (!chrome) return mainLines;
 
   const theme = deps.getTheme();
   const state = deps.state;
   const stripRows: 1 | 2 = height >= TWO_ROW_MIN_HEIGHT ? 2 : 1;
 
+  // Resolve the active channel first; a vanished sub-agent falls back to main.
+  let agent: SubagentSnapshot | undefined;
+  if (!state.isMainSelected()) {
+    agent = registry.list().find((candidate) => candidate.id === state.selectedId);
+    if (!agent) state.selectMain();
+  }
+  const onMain = state.isMainSelected();
+
+  // On the main channel the prompt stays pinned; on a sub-agent channel the
+  // editor is dropped (prompt hidden, cursor released) and its rows go to the
+  // scrollback. The footer/powerline below the editor is always pinned.
+  const chromeLines = onMain ? [...chrome.editorLines, ...chrome.belowLines] : chrome.belowLines;
+  const chromeRows = chromeLines.length;
+
   // Build the active channel's window line buffer.
   let windowLines: string[];
-  if (state.isMainSelected()) {
-    windowLines = mainLines.slice(0, Math.max(0, mainLines.length - chromeRows));
+  if (onMain || !agent) {
+    // The native frame always carries editor + footer at its tail; strip both.
+    const nativeChrome = chrome.editorLines.length + chrome.belowLines.length;
+    windowLines = mainLines.slice(0, Math.max(0, mainLines.length - nativeChrome));
   } else {
-    const agent = registry.list().find((candidate) => candidate.id === state.selectedId);
-    if (!agent) {
-      state.selectMain();
-      windowLines = mainLines.slice(0, Math.max(0, mainLines.length - chromeRows));
-    } else {
-      const buffer = state.buffer(agent.id);
-      buffer.setBlocks(agent.blocks, agent.blocks.length);
-      windowLines = [...buffer.lines(width), ...liveLines(agent, width, theme)];
-    }
+    const buffer = state.buffer(agent.id);
+    buffer.setBlocks(agent.blocks, agent.blocks.length);
+    windowLines = [...buffer.lines(width), ...liveLines(agent, width, theme)];
   }
 
   const viewport = Math.max(1, height - chromeRows - stripRows);

@@ -365,7 +365,7 @@ const stripModel = {
     { kind: "running", activity: "reasoning", selected: true, hasNewOutput: false },
     { kind: "done", activity: "idle", selected: false, hasNewOutput: true },
   ],
-  selectedIndex: 1, selectedLabel: "explore auth", selectedStatus: "reasoning",
+  selectedIndex: 1, selectedLabel: "explore auth", selectedStatus: "reasoning", offMain: true,
   spinner: true, spinnerFrame: 2, scrolledUp: false, percent: 100, linesBelow: 0, ascii: false,
 };
 for (const w of [30, 44, 80, 120]) {
@@ -376,6 +376,17 @@ for (const w of [30, 44, 80, 120]) {
     if (!lines[0].includes("2/3")) throw new Error(`subagent strip position smoke failed @${w}`);
   }
 }
+// At the live tail there is no scroll readout and no alt+l hint (noise-free);
+// scrolled off the tail both appear. Esc hint is shown only on a sub-agent channel.
+const liveStrip = renderStrip(stripModel, 120, titaniumTheme, 2);
+if (liveStrip.join("\n").includes("live")) throw new Error("subagent strip should hide live badge at tail");
+if (liveStrip[1].includes("alt+l")) throw new Error("subagent strip should hide alt+l hint at tail");
+if (!liveStrip[1].includes("Esc")) throw new Error("subagent strip should show Esc hint off-main");
+const scrolledStrip = renderStrip({ ...stripModel, scrolledUp: true, percent: 40, linesBelow: 30 }, 120, titaniumTheme, 2);
+if (!scrolledStrip[1].includes("alt+l")) throw new Error("subagent strip should show alt+l hint when scrolled");
+if (!scrolledStrip[0].includes("▲")) throw new Error("subagent strip should show scroll position when scrolled");
+const mainStrip = renderStrip({ ...stripModel, offMain: false }, 120, titaniumTheme, 2);
+if (mainStrip[1].includes("Esc")) throw new Error("subagent strip should hide Esc hint on main");
 const banner = bannerLine(8, 100, titaniumTheme);
 if (visibleWidth(banner) > 100 || !banner.includes("VIEWING HISTORY")) throw new Error("subagent strip banner smoke failed");
 
@@ -410,7 +421,14 @@ viewState.select("call:One");
 pagerFrame = composePagerFrame(pagerTui, mainFrame, 120, 40, pagerDeps);
 if (!pagerFrame.some((line) => line.includes("Found the bug"))) throw new Error("pager sub-agent transcript smoke failed");
 if (pagerFrame.some((line) => line.includes("main row 59"))) throw new Error("pager channel-swap smoke failed");
-if (!pagerFrame.join("\n").includes(MARKER)) throw new Error("pager cursor pinned on sub-agent smoke failed");
+// Off the main channel the prompt is hidden: no cursor marker (so pi-tui hides
+// the hardware cursor), but the powerline footer below it stays pinned.
+if (pagerFrame.join("\n").includes(MARKER)) throw new Error("pager prompt should be hidden off-main smoke failed");
+if (!pagerFrame.some((line) => line.includes(footerLine))) throw new Error("pager footer pinned off-main smoke failed");
+// Returning to the main channel restores the prompt + cursor marker.
+viewState.selectMain();
+pagerFrame = composePagerFrame(pagerTui, mainFrame, 120, 40, pagerDeps);
+if (!pagerFrame.join("\n").includes(MARKER)) throw new Error("pager prompt restored on main smoke failed");
 
 viewState.selectMain();
 composePagerFrame(pagerTui, mainFrame, 120, 40, pagerDeps);

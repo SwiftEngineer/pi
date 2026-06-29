@@ -19,6 +19,9 @@
  *
  * @see ./frame.ts (composition) · ./view-state.ts (selection/scroll) · ./registry.ts.
  */
+import { appendFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, matchesKey, type OverlayHandle, type OverlayOptions } from "@earendil-works/pi-tui";
 import { composePagerFrame, type FrameTui, statusStripLines } from "./frame.ts";
@@ -35,6 +38,29 @@ interface SplitGlobals {
 
 const splitGlobals = globalThis as unknown as SplitGlobals;
 const ANIMATION_INTERVAL_MS = 100;
+
+/**
+ * Opt-in geometry log (`PI_SUBAGENT_DEBUG=1`) for diagnosing scroll behaviour on
+ * a real terminal — records the page jump vs. the actually-rendered viewport so
+ * we can confirm a PgUp press can never out-jump the visible window.
+ */
+const debugLog: ((message: string) => void) | undefined =
+  process.env.PI_SUBAGENT_DEBUG === "1"
+    ? (message: string): void => {
+        try {
+          appendFileSync(path.join(os.homedir(), ".pi", "subagent-view-debug.log"), `${new Date().toISOString()} ${message}\n`);
+        } catch {
+          // Diagnostics must never break the render loop.
+        }
+      }
+    : undefined;
+
+/** A printable keystroke (not ESC-led, not a control byte) that should land in the prompt. */
+function isPrintable(data: string): boolean {
+  if (data.length === 0) return false;
+  const code = data.charCodeAt(0);
+  return code >= 0x20 && code !== 0x7f;
+}
 
 /** Whether to draw ASCII glyphs (no-Unicode terminals). */
 function detectAscii(): boolean {
@@ -87,9 +113,13 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
   };
 
   /**
-   * Scroll the active channel directly with PgUp/PgDn — no focus mode. Only
-   * these two keys are intercepted (and only while sub-agents exist), so the
-   * editor keeps every other key, including arrows/Home/End for text editing.
+   * Direct PgUp/PgDn scrolling of the active channel (no focus mode), plus
+   * navigation back to the main agent while a sub-agent is selected. On the main
+   * channel only PgUp/PgDn are intercepted, so the editor keeps every other key
+   * (arrows/Home/End for text editing). On a sub-agent channel the prompt is
+   * hidden, so any keystroke that would normally type returns to the main agent
+   * (Escape/Enter consumed; a printable char switches and then lands in the
+   * prompt) — preventing input from being lost into an invisible editor.
    */
   const installInput = (ctx: ExtensionContext): void => {
     if (removeInput || typeof ctx.ui.onTerminalInput !== "function") return;
@@ -101,8 +131,27 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
         requestRepaint();
         return { consume: true };
       };
-      if (matchesKey(data, "pageUp")) return scroll(-view.pageRows());
-      if (matchesKey(data, "pageDown")) return scroll(view.pageRows());
+      if (matchesKey(data, "pageUp")) {
+        debugLog?.(`pageUp ${JSON.stringify(view.lastGeometry())}`);
+        return scroll(-view.pageRows());
+      }
+      if (matchesKey(data, "pageDown")) {
+        debugLog?.(`pageDown ${JSON.stringify(view.lastGeometry())}`);
+        return scroll(view.pageRows());
+      }
+      if (!view.isMainSelected()) {
+        if (matchesKey(data, "escape") || matchesKey(data, "enter")) {
+          view.selectMain();
+          requestRepaint();
+          return { consume: true };
+        }
+        if (isPrintable(data)) {
+          // Switch to main and let the keystroke flow into the now-visible prompt.
+          view.selectMain();
+          requestRepaint();
+          return undefined;
+        }
+      }
       return undefined;
     });
   };

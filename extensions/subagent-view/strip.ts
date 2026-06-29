@@ -39,6 +39,8 @@ export interface StripModel {
   selectedLabel: string;
   /** Live status word for the selected channel, e.g. "reasoning" / "using read". */
   selectedStatus: string;
+  /** True when a sub-agent channel (not the main agent) is selected. */
+  offMain: boolean;
   /** Animate the spinner (selected channel is actively working). */
   spinner: boolean;
   /** Spinner frame index (caller advances it; keeps this module pure). */
@@ -132,10 +134,11 @@ export function renderStrip(model: StripModel, width: number, theme: Theme, rows
   const spin = model.spinner ? ` ${theme.fg("warning", spinnerGlyph(model))}` : "";
   const status = model.selectedStatus ? `${theme.fg("muted", model.selectedStatus)}${spin}` : "";
   const positionField = theme.fg("dim", position);
-  const scrollFull = model.scrolledUp
-    ? theme.fg("warning", `${ascii ? "^" : "▲"} ${model.percent}%`)
-    : theme.fg("success", `${ascii ? "*" : "●"} live`);
-  const scrollShort = model.scrolledUp ? theme.fg("warning", ascii ? "^" : "▲") : theme.fg("success", ascii ? "*" : "●");
+  // When pinned to the live tail there is no scroll readout at all — the banner
+  // (and the lack of any indicator) already make "you're live" obvious, so a
+  // "● live" badge would just be noise. Only show a position cue when scrolled.
+  const scrollFull = model.scrolledUp ? theme.fg("warning", `${ascii ? "^" : "▲"} ${model.percent}%`) : "";
+  const scrollShort = model.scrolledUp ? theme.fg("warning", ascii ? "^" : "▲") : "";
 
   // Degrade by dropping the lowest-priority field first; the symbol row and
   // position indicator are never dropped (see the design's width budget).
@@ -156,17 +159,26 @@ export function renderStrip(model: StripModel, width: number, theme: Theme, rows
   const statusLine = padBetween(chosen.left, chosen.right, width);
 
   if (rows === 1) return [statusLine];
-  return [statusLine, controlsLine(width, theme)];
+  return [statusLine, controlsLine(width, theme, model)];
 }
 
-/** The always-visible controls hint (self-documenting for first-time users). */
-function controlsLine(width: number, theme: Theme): string {
-  const hint = theme.fg("dim", ["PgUp/PgDn scroll", "alt+]/[ switch", "alt+l live"].join(" · "));
-  // Compact fallback when the full hint can't fit.
-  if (visibleWidth(hint) > width) {
-    return truncateToWidth(theme.fg("dim", "PgUp/PgDn scroll · alt+]/[ switch"), width, "…", true);
-  }
-  return hint;
+/**
+ * The always-visible controls hint (self-documenting for first-time users).
+ * Context-aware: `Esc → main` only appears while a sub-agent is selected (the
+ * prompt is hidden then), and `alt+l live` only while scrolled off the tail
+ * (when already live there is nothing to jump back to).
+ */
+function controlsLine(width: number, theme: Theme, model: StripModel): string {
+  const ascii = model.ascii;
+  const arrow = ascii ? "->" : "→";
+  const parts = ["PgUp/PgDn scroll", "alt+]/[ switch"];
+  if (model.offMain) parts.push(`Esc ${arrow} main`);
+  if (model.scrolledUp) parts.push("alt+l live");
+  const hint = theme.fg("dim", parts.join(" · "));
+  if (visibleWidth(hint) <= width) return hint;
+  // Compact fallback: keep scrolling + the most relevant navigation hint.
+  const compact = ["PgUp/PgDn scroll", model.offMain ? `Esc ${arrow} main` : "alt+]/[ switch"];
+  return truncateToWidth(theme.fg("dim", compact.join(" · ")), width, "…", true);
 }
 
 /** Left/right justify two segments within `width`, ANSI-aware. */

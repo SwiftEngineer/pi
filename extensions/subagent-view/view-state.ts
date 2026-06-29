@@ -106,9 +106,19 @@ export class SubagentViewState {
     this.#lastViewport = Math.max(1, viewport);
   }
 
-  /** One page = a viewport minus one line of overlap. */
+  /**
+   * One page = the visible scrollback viewport minus one line of overlap, so
+   * consecutive PgUp/PgDn presses leave a shared line between pages and never
+   * skip content. Capped at the line count so we never page past the buffer.
+   */
   pageRows(): number {
-    return Math.max(1, this.#lastViewport - 1);
+    const overlap = Math.max(1, this.#lastViewport - 1);
+    return Math.max(1, Math.min(overlap, this.#lastTotal));
+  }
+
+  /** Last rendered geometry, for the `PI_SUBAGENT_DEBUG` diagnostic log. */
+  lastGeometry(): { total: number; viewport: number; pageRows: number } {
+    return { total: this.#lastTotal, viewport: this.#lastViewport, pageRows: this.pageRows() };
   }
 
   scrollActive(delta: number): void {
