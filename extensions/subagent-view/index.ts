@@ -226,7 +226,7 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
       });
     }
     pi.registerShortcut("alt+\\", { description: "Sub-agents: focus to scroll", handler: select((v) => v.toggleFocus()) });
-    pi.registerShortcut("alt+f", { description: "Sub-agents: follow latest", handler: select((v) => v.scrollActiveToBottom()) });
+    pi.registerShortcut("alt+l", { description: "Sub-agents: follow latest (live)", handler: select((v) => v.scrollActiveToBottom()) });
   }
 
   pi.on("session_start", (_event, ctx) => {

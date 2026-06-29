@@ -338,7 +338,7 @@ const { composePagerFrame } = await jiti.import(path.join(root, "extensions/suba
 const { visibleWidth } = await import("@earendil-works/pi-tui");
 
 // Shortcuts the redesigned pager registers (new bindings + muscle-memory aliases).
-for (const shortcut of ["alt+]", "alt+[", "alt+0", "alt+1", "alt+\\", "alt+f", "alt+s", "alt+a"]) {
+for (const shortcut of ["alt+]", "alt+[", "alt+0", "alt+1", "alt+\\", "alt+l", "alt+s", "alt+a"]) {
   if (!shortcuts.has(shortcut)) throw new Error(`subagent-view shortcut missing: ${shortcut}`);
 }
 

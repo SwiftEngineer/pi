@@ -165,7 +165,7 @@ export function renderStrip(model: StripModel, width: number, theme: Theme, rows
 function controlsLine(model: StripModel, width: number, theme: Theme): string {
   const parts = model.focused
     ? ["↑↓/PgUp/PgDn scroll", "Home/End top/live", "esc unfocus"]
-    : ["alt+]/[ switch", "alt+1-9 jump", "alt+0 main", "alt+f follow", "alt+\\ scroll"];
+    : ["alt+]/[ switch", "alt+1-9 jump", "alt+0 main", "alt+l live", "alt+\\ scroll"];
   const hint = theme.fg("dim", parts.join(" · "));
   // Compact fallback when the full hint can't fit.
   if (visibleWidth(hint) > width) {
