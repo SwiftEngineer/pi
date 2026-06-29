@@ -1,32 +1,32 @@
 /**
- * Sub-agent split view.
+ * Sub-agent pager view.
  *
- * When the `task` tool spawns sub-agents, this extension divides the screen and
- * dedicates one half to a live feed of a single sub-agent (the user keeps
- * prompting the main agent in the other half). A status-symbol row shows every
- * sub-agent at once — watched, still-running, and finished — and hotkeys swap
- * which sub-agent the feed follows.
+ * When the `task` tool spawns sub-agents, the whole scrollback becomes a
+ * switchable pager: a permanently-pinned 1–2 line status strip sits at the very
+ * bottom (below the prompt + powerline), and the area above shows ONE selected
+ * channel — the main agent (channel 0) or a sub-agent — scrollable on its own.
+ * Switching channels and scrolling are O(viewport), so they stay snappy no
+ * matter how massive the history is.
  *
  * Two rendering paths:
- *   - core: when Pi's render loop is patched (see scripts/patch-pi-tui-split.mjs),
- *     a `globalThis.__piSplitFrame` hook composes a TRUE reserved split-pane in
- *     both orientations — the main view reflows into its own half. Adaptive:
- *     horizontal divider on tall/portrait terminals, vertical on wide ones.
- *   - overlay: when unpatched, a persistent non-capturing overlay draws the feed
- *     on the top half (clean), keeping the editor focused below. The vertical
- *     overlay is opt-in (PI_SUBAGENT_VERTICAL=1) since overlays can't reflow the
- *     main transcript.
+ *   - core: when Pi's render loop is patched (scripts/patch-pi-tui-split.mjs), a
+ *     `globalThis.__piSplitFrame` hook composes the reserved layout — the editor
+ *     and powerline stay pinned (cursor never lost) while the transcript region
+ *     is replaced by the active channel's window. Key-only scroll (no mouse
+ *     capture) is gated on pager focus so it never steals the editor's keys.
+ *   - overlay: when unpatched, a bottom non-capturing overlay shows the status
+ *     strip only (no paging); the main scrollback stays native.
  *
- * @see ./registry.ts for the shared state the `task` tool feeds.
- * @see ./split.ts for the reserved split-pane composition.
+ * @see ./frame.ts (composition) · ./view-state.ts (selection/scroll) · ./registry.ts.
  */
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { OverlayHandle } from "@earendil-works/pi-tui";
-import { type OverlayPlacement, SubagentPanel, type TuiLike } from "./panel.ts";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { type Component, matchesKey, type OverlayHandle, type OverlayOptions } from "@earendil-works/pi-tui";
+import { composePagerFrame, type FrameTui, statusStripLines } from "./frame.ts";
 import { subagentRegistry } from "./registry.ts";
-import { composeSplitFrame } from "./split.ts";
+import { SubagentViewState } from "./view-state.ts";
 
-type SplitHook = (tui: TuiLike, mainLines: string[], width: number, height: number) => string[];
+type HookTui = FrameTui & { requestRender(force?: boolean): void };
+type SplitHook = (tui: HookTui, mainLines: string[], width: number, height: number) => string[];
 
 interface SplitGlobals {
   __piSplitFrame?: SplitHook | undefined;
@@ -34,46 +34,35 @@ interface SplitGlobals {
 }
 
 const splitGlobals = globalThis as unknown as SplitGlobals;
-
-/** Fallback overlay placement used before the panel/terminal size is known. */
-const DEFAULT_PLACEMENT: OverlayPlacement = {
-  width: "100%",
-  maxHeight: "50%",
-  anchor: "top-center",
-  nonCapturing: true,
-  visible: (termWidth, termHeight) => termWidth >= 60 && termHeight >= 16,
-};
-
 const ANIMATION_INTERVAL_MS = 100;
 
-/**
- * Whether to use a vertical (left/right) divider on wide terminals. Clean only
- * under the core patch, so it is on by default there (disable with =0) and off
- * by default in overlay mode (enable, accepting transcript bleed, with =1).
- */
-function allowVertical(corePatched: boolean): boolean {
-  const env = process.env.PI_SUBAGENT_VERTICAL;
-  return corePatched ? env !== "0" : env === "1";
+/** Whether to draw ASCII glyphs (no-Unicode terminals). */
+function detectAscii(): boolean {
+  if (process.env.PI_ASCII === "1") return true;
+  const locale = process.env.LC_ALL || process.env.LC_CTYPE || process.env.LANG || "";
+  return locale !== "" && !/utf-?8/i.test(locale);
 }
 
 export default function subagentViewExtension(pi: ExtensionAPI): void {
   let latestCtx: ExtensionContext | undefined;
   let mode: "core" | "overlay" | undefined;
+  let lastTui: { requestRender(force?: boolean): void } | undefined;
+  let state: SubagentViewState | undefined;
+  let animationTimer: ReturnType<typeof setInterval> | undefined;
+  let removeInput: (() => void) | undefined;
+  const isAscii = detectAscii();
 
-  // core-mode state
-  let lastTui: TuiLike | undefined;
-  let splitDisabled = false;
-
-  // overlay-mode state
-  let panel: SubagentPanel | undefined;
-  let panelTui: TuiLike | undefined;
+  // overlay-mode refs
   let overlayHandle: OverlayHandle | undefined;
   let closeOverlay: (() => void) | undefined;
   let opening = false;
+  let panelTui: { requestRender(force?: boolean): void } | undefined;
   let appliedHidden: boolean | undefined;
-  let userHidden = false;
 
-  let animationTimer: ReturnType<typeof setInterval> | undefined;
+  const getState = (): SubagentViewState => {
+    if (!state) state = new SubagentViewState(subagentRegistry, () => latestCtx?.ui.theme as Theme);
+    return state;
+  };
 
   const requestRepaint = (): void => {
     (mode === "core" ? lastTui : panelTui)?.requestRender();
@@ -83,9 +72,13 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
     const hook: SplitHook = (tui, mainLines, width, height) => {
       lastTui = tui;
       const ctx = latestCtx;
-      if (splitDisabled || !ctx || subagentRegistry.isEmpty()) return mainLines;
+      if (!ctx || subagentRegistry.isEmpty()) return mainLines;
       try {
-        return composeSplitFrame(tui, mainLines, width, height, () => ctx.ui.theme, allowVertical(true));
+        return composePagerFrame(tui, mainLines, width, height, {
+          state: getState(),
+          getTheme: () => ctx.ui.theme,
+          ascii: isAscii,
+        });
       } catch {
         return mainLines;
       }
@@ -93,33 +86,61 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
     splitGlobals.__piSplitFrame = hook;
   };
 
+  /** Capture key-only scroll while the pager is focused; pass everything else through. */
+  const installInput = (ctx: ExtensionContext): void => {
+    if (removeInput || typeof ctx.ui.onTerminalInput !== "function") return;
+    removeInput = ctx.ui.onTerminalInput((data) => {
+      const view = getState();
+      if (!view.focused || subagentRegistry.isEmpty()) return undefined;
+      const scroll = (fn: () => void): { consume: true } => {
+        fn();
+        requestRepaint();
+        return { consume: true };
+      };
+      if (matchesKey(data, "up")) return scroll(() => view.scrollActive(-1));
+      if (matchesKey(data, "down")) return scroll(() => view.scrollActive(1));
+      if (matchesKey(data, "pageUp")) return scroll(() => view.scrollActive(-view.pageRows()));
+      if (matchesKey(data, "pageDown")) return scroll(() => view.scrollActive(view.pageRows()));
+      if (matchesKey(data, "home") || data === "g") return scroll(() => view.scrollActiveToTop());
+      if (matchesKey(data, "end") || data === "G") return scroll(() => view.scrollActiveToBottom());
+      if (matchesKey(data, "escape")) return scroll(() => view.setFocused(false));
+      return undefined;
+    });
+  };
+
+  const overlayOptions = (): OverlayOptions => ({
+    width: "100%",
+    anchor: "bottom-center",
+    nonCapturing: true,
+  });
+
   const ensureOverlay = (ctx: ExtensionContext): void => {
     if (overlayHandle || opening || ctx.mode !== "tui") return;
     opening = true;
     appliedHidden = undefined;
+    const overlay: Component = {
+      invalidate: () => {},
+      render: (width: number): string[] => {
+        const current = latestCtx;
+        if (!current || subagentRegistry.isEmpty()) return [];
+        try {
+          return statusStripLines(getState(), current.ui.theme, isAscii, width, width >= 60 ? 2 : 1);
+        } catch {
+          return [];
+        }
+      },
+    };
     void ctx.ui
       .custom<void>(
-        (tui, theme, _keybindings, done) => {
-          panelTui = tui as unknown as TuiLike;
+        (tui, _theme, _keybindings, done) => {
+          panelTui = tui as unknown as { requestRender(force?: boolean): void };
           closeOverlay = () => done();
-          panel = new SubagentPanel(
-            panelTui,
-            () => latestCtx?.ui.theme ?? theme,
-            subagentRegistry,
-            () => allowVertical(false),
-          );
-          return panel;
+          return overlay;
         },
-        {
-          overlay: true,
-          overlayOptions: () => (panel ? panel.layout().overlay : DEFAULT_PLACEMENT),
-          onHandle: (handle) => {
-            overlayHandle = handle;
-          },
-        },
+        { overlay: true, overlayOptions, onHandle: (handle) => { overlayHandle = handle; } },
       )
       .catch(() => {
-        // Overlay closed/disposed; refs are cleared by teardown().
+        // Overlay disposed; refs cleared by teardown().
       });
   };
 
@@ -132,7 +153,10 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
   const syncAnimation = (): void => {
     const running = !subagentRegistry.isEmpty() && subagentRegistry.counts().running > 0;
     if (running && !animationTimer) {
-      animationTimer = setInterval(() => requestRepaint(), ANIMATION_INTERVAL_MS);
+      animationTimer = setInterval(() => {
+        if (state) state.spinnerFrame++;
+        requestRepaint();
+      }, ANIMATION_INTERVAL_MS);
       animationTimer.unref?.();
     } else if (!running && animationTimer) {
       clearInterval(animationTimer);
@@ -140,12 +164,13 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
     }
   };
 
-  /** Reconcile the split with current registry state. */
+  /** Reconcile the view with current registry state. */
   const syncSplit = (): void => {
     const ctx = latestCtx;
     if (!ctx || ctx.mode !== "tui") return;
+    getState().noteRegistryChange();
     if (mode === "core") {
-      lastTui?.requestRender();
+      requestRepaint();
       syncAnimation();
       return;
     }
@@ -155,7 +180,7 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
       return;
     }
     ensureOverlay(ctx);
-    applyHidden(userHidden);
+    applyHidden(false);
     panelTui?.requestRender();
     syncAnimation();
   };
@@ -166,56 +191,52 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
       animationTimer = undefined;
     }
     if (splitGlobals.__piSplitFrame) splitGlobals.__piSplitFrame = undefined;
+    removeInput?.();
+    removeInput = undefined;
     closeOverlay?.();
     closeOverlay = undefined;
     overlayHandle = undefined;
-    panel = undefined;
     panelTui = undefined;
     lastTui = undefined;
     opening = false;
     appliedHidden = undefined;
-    userHidden = false;
-    splitDisabled = false;
+    state?.reset();
   };
 
   subagentRegistry.subscribe(syncSplit);
 
   if (typeof pi.registerShortcut === "function") {
-    pi.registerShortcut("alt+s", {
-      description: "Sub-agents: watch next",
-      handler: () => {
-        userHidden = false;
-        splitDisabled = false;
-        subagentRegistry.cycle(1);
-      },
-    });
-    pi.registerShortcut("alt+a", {
-      description: "Sub-agents: watch previous",
-      handler: () => {
-        userHidden = false;
-        splitDisabled = false;
-        subagentRegistry.cycle(-1);
-      },
-    });
-    pi.registerShortcut("ctrl+\\", {
-      description: "Sub-agents: toggle live panel",
-      handler: () => {
-        if (mode === "core") {
-          splitDisabled = !splitDisabled;
-          lastTui?.requestRender();
-        } else {
-          userHidden = !userHidden;
-          syncSplit();
-        }
-      },
-    });
+    const select = (fn: (view: SubagentViewState) => void) => () => {
+      fn(getState());
+      requestRepaint();
+    };
+    pi.registerShortcut("alt+]", { description: "Sub-agents: next channel", handler: select((v) => v.cycle(1)) });
+    pi.registerShortcut("alt+[", { description: "Sub-agents: previous channel", handler: select((v) => v.cycle(-1)) });
+    // Muscle-memory aliases for the previous bindings.
+    pi.registerShortcut("alt+s", { description: "Sub-agents: next channel", handler: select((v) => v.cycle(1)) });
+    pi.registerShortcut("alt+a", { description: "Sub-agents: previous channel", handler: select((v) => v.cycle(-1)) });
+    pi.registerShortcut("alt+0", { description: "Sub-agents: view main", handler: select((v) => v.selectMain()) });
+    for (let n = 1; n <= 9; n++) {
+      pi.registerShortcut(`alt+${n}` as "alt+1", {
+        description: `Sub-agents: view channel ${n}`,
+        handler: select((v) => {
+          const id = v.channelIds()[n];
+          if (id) v.select(id);
+        }),
+      });
+    }
+    pi.registerShortcut("alt+\\", { description: "Sub-agents: focus to scroll", handler: select((v) => v.toggleFocus()) });
+    pi.registerShortcut("alt+f", { description: "Sub-agents: follow latest", handler: select((v) => v.scrollActiveToBottom()) });
   }
 
   pi.on("session_start", (_event, ctx) => {
     if (ctx.mode !== "tui") return;
     latestCtx = ctx;
     mode = splitGlobals.__PI_SPLIT_PATCH__ ? "core" : "overlay";
-    if (mode === "core") installCoreHook();
+    if (mode === "core") {
+      installCoreHook();
+      installInput(ctx);
+    }
     syncSplit();
   });
 
@@ -223,14 +244,14 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
   // resets stale finished agents when starting a fresh background batch.
   pi.on("agent_start", (_event, ctx) => {
     if (ctx.mode === "tui") latestCtx = ctx;
-    userHidden = false;
-    splitDisabled = false;
+    getState().setFocused(false);
     syncSplit();
   });
 
   pi.on("session_shutdown", () => {
     teardown();
     subagentRegistry.reset();
+    state = undefined;
     latestCtx = undefined;
     mode = undefined;
   });

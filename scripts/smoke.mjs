@@ -332,93 +332,100 @@ if (patchSettingsManager(restoredSettingsManager) !== restoredSettingsManager) t
 
 
 const { subagentRegistry } = await jiti.import(path.join(root, "extensions/subagent-view/registry.ts"));
-const { SubagentPanel, chooseLayout } = await jiti.import(path.join(root, "extensions/subagent-view/panel.ts"));
+const { renderStrip, bannerLine } = await jiti.import(path.join(root, "extensions/subagent-view/strip.ts"));
+const { SubagentViewState } = await jiti.import(path.join(root, "extensions/subagent-view/view-state.ts"));
+const { composePagerFrame } = await jiti.import(path.join(root, "extensions/subagent-view/frame.ts"));
 const { visibleWidth } = await import("@earendil-works/pi-tui");
 
-for (const shortcut of ["alt+s", "alt+a", "ctrl+\\"]) {
+// Shortcuts the redesigned pager registers (new bindings + muscle-memory aliases).
+for (const shortcut of ["alt+]", "alt+[", "alt+0", "alt+1", "alt+\\", "alt+f", "alt+s", "alt+a"]) {
   if (!shortcuts.has(shortcut)) throw new Error(`subagent-view shortcut missing: ${shortcut}`);
 }
 
-if (chooseLayout(200, 50, true).orientation !== "vertical") throw new Error("subagent layout wide-vertical smoke failed");
-if (chooseLayout(200, 50, false).orientation !== "horizontal") throw new Error("subagent layout vertical opt-out smoke failed");
-if (chooseLayout(80, 70, true).orientation !== "horizontal") throw new Error("subagent layout tall-horizontal smoke failed");
-
+// --- registry: append-only transcript keeps full history (not a rolling tail) ---
 subagentRegistry.reset();
 subagentRegistry.add("call:One", "explore auth", "explore");
 subagentRegistry.add("call:Two", "review diff", "reviewer");
 subagentRegistry.add("call:Three", "write docs", "task");
 subagentRegistry.start("call:One");
-subagentRegistry.update("call:One", { appendText: "Inspecting the auth module", phase: "writing" });
+subagentRegistry.appendMessage("call:One", { role: "assistant", content: [{ type: "thinking", thinking: "tracing the refresh path" }, { type: "text", text: "Found the bug in refresh.ts" }] });
 subagentRegistry.start("call:Two");
 subagentRegistry.finish("call:Three", { state: "done", final: "Docs written.", exitInfo: "completed" });
-
 const subagentCounts = subagentRegistry.counts();
-if (subagentCounts.total !== 3 || subagentCounts.finished !== 1 || subagentCounts.running !== 2) {
-  throw new Error("subagent registry counts smoke failed");
+if (subagentCounts.total !== 3 || subagentCounts.finished !== 1 || subagentCounts.running !== 2) throw new Error("subagent registry counts smoke failed");
+const oneBlocks = subagentRegistry.list().find((agent) => agent.id === "call:One")?.blocks ?? [];
+if (oneBlocks.length !== 2 || !oneBlocks.some((block) => block.kind === "thinking") || !oneBlocks.some((block) => block.text.includes("Found the bug"))) {
+  throw new Error("subagent transcript blocks smoke failed");
 }
 
-const fakeSubagentTui = { terminal: { rows: 40, columns: 120 }, requestRender() {} };
-const subagentPanel = new SubagentPanel(fakeSubagentTui, () => titaniumTheme, subagentRegistry, () => false);
-const subagentPanelWidth = 120;
-const subagentPanelLines = subagentPanel.render(subagentPanelWidth);
-if (subagentPanelLines.length === 0) throw new Error("subagent panel should render when agents exist");
-for (const line of subagentPanelLines) {
-  if (visibleWidth(line) > subagentPanelWidth) throw new Error("subagent panel line exceeds width");
-}
-// Lines must stay within bounds at narrow widths too (border/hint must not overflow).
-for (const narrow of [30, 34, 48, 80]) {
-  for (const line of subagentPanel.render(narrow)) {
-    if (visibleWidth(line) > narrow) throw new Error(`subagent panel line exceeds narrow width ${narrow}`);
+// --- status strip: width-safe, shows symbols + selected name + position ---
+const stripModel = {
+  channels: [
+    { kind: "main", activity: "idle", selected: false, hasNewOutput: false },
+    { kind: "running", activity: "reasoning", selected: true, hasNewOutput: false },
+    { kind: "done", activity: "idle", selected: false, hasNewOutput: true },
+  ],
+  selectedIndex: 1, selectedLabel: "explore auth", selectedStatus: "reasoning",
+  spinner: true, spinnerFrame: 2, scrolledUp: false, percent: 100, linesBelow: 0, focused: false, ascii: false,
+};
+for (const w of [30, 44, 80, 120]) {
+  for (const rows of [1, 2]) {
+    const lines = renderStrip(stripModel, w, titaniumTheme, rows);
+    if (lines.length !== rows) throw new Error(`subagent strip row count smoke failed @${w}/${rows}`);
+    for (const line of lines) if (visibleWidth(line) > w) throw new Error(`subagent strip width smoke failed @${w}`);
+    if (!lines[0].includes("2/3")) throw new Error(`subagent strip position smoke failed @${w}`);
   }
 }
-const subagentPanelText = subagentPanelLines.join("\n");
-for (const expected of ["Sub-agents 1/3", "◉", "✓", "●", "explore auth"]) {
-  if (!subagentPanelText.includes(expected)) throw new Error(`subagent panel smoke failed: ${expected}`);
-}
-// Auto-select follows the first running sub-agent and stays there.
-if (subagentRegistry.watched()?.label !== "explore auth") throw new Error("subagent auto-select smoke failed");
-subagentRegistry.cycle(1);
-if (subagentRegistry.watched()?.label !== "review diff") throw new Error("subagent cycle smoke failed");
-if (subagentPanel.render(120).length === 0) throw new Error("subagent panel re-render smoke failed");
+const banner = bannerLine(8, 100, titaniumTheme);
+if (visibleWidth(banner) > 100 || !banner.includes("VIEWING HISTORY")) throw new Error("subagent strip banner smoke failed");
+
+// --- view-state: selection includes main (channel 0) + sub-agents ---
+const viewState = new SubagentViewState(subagentRegistry, () => titaniumTheme);
+viewState.noteRegistryChange();
+if (viewState.selectedId !== "main" || viewState.channelIds().length !== 4) throw new Error("view-state channels smoke failed");
+viewState.cycle(1);
+if (viewState.selectedId !== "call:One") throw new Error("view-state cycle smoke failed");
+viewState.selectMain();
+if (!viewState.isMainSelected()) throw new Error("view-state selectMain smoke failed");
+
+// --- frame composition: pinned chrome + switchable window + loud history banner ---
+const MARKER = "_pi:c";
+const mkChild = (lines) => ({ render: () => lines });
+const pagerTranscript = Array.from({ length: 60 }, (_, i) => `main row ${i}`);
+const editorLine = "> prompt " + MARKER;
+const footerLine = "[ powerline ]";
+const pagerChildren = [mkChild(pagerTranscript), mkChild([editorLine]), mkChild([footerLine])];
+const mainFrame = [...pagerTranscript, editorLine, footerLine];
+const pagerTui = { terminal: { rows: 40, columns: 120 }, children: pagerChildren };
+const pagerDeps = { state: viewState, getTheme: () => titaniumTheme, ascii: false };
+
+let pagerFrame = composePagerFrame(pagerTui, mainFrame, 120, 40, pagerDeps);
+if (pagerFrame.length !== 40) throw new Error("pager frame height smoke failed");
+if (!pagerFrame.join("\n").includes(MARKER)) throw new Error("pager cursor-marker pinned smoke failed");
+if (!pagerFrame.some((line) => line.includes(footerLine))) throw new Error("pager footer pinned smoke failed");
+if (!pagerFrame.some((line) => line.includes("main row 59"))) throw new Error("pager main tail smoke failed");
+for (const line of pagerFrame) if (visibleWidth(line) > 120) throw new Error("pager width smoke failed");
+
+viewState.select("call:One");
+pagerFrame = composePagerFrame(pagerTui, mainFrame, 120, 40, pagerDeps);
+if (!pagerFrame.some((line) => line.includes("Found the bug"))) throw new Error("pager sub-agent transcript smoke failed");
+if (pagerFrame.some((line) => line.includes("main row 59"))) throw new Error("pager channel-swap smoke failed");
+if (!pagerFrame.join("\n").includes(MARKER)) throw new Error("pager cursor pinned on sub-agent smoke failed");
+
+viewState.selectMain();
+composePagerFrame(pagerTui, mainFrame, 120, 40, pagerDeps);
+viewState.scrollActive(-12);
+pagerFrame = composePagerFrame(pagerTui, mainFrame, 120, 40, pagerDeps);
+if (!pagerFrame.some((line) => line.includes("VIEWING HISTORY"))) throw new Error("pager scroll banner smoke failed");
+viewState.scrollActiveToBottom();
+pagerFrame = composePagerFrame(pagerTui, mainFrame, 120, 40, pagerDeps);
+if (pagerFrame.some((line) => line.includes("VIEWING HISTORY"))) throw new Error("pager jump-to-live smoke failed");
+
+const noMarkerTui = { terminal: { rows: 40, columns: 120 }, children: [mkChild(pagerTranscript), mkChild(["no marker"])] };
+if (composePagerFrame(noMarkerTui, mainFrame, 120, 40, pagerDeps) !== mainFrame) throw new Error("pager passthrough (no marker) smoke failed");
 subagentRegistry.reset();
-if (!subagentRegistry.isEmpty() || subagentPanel.render(120).length !== 0) throw new Error("subagent registry reset smoke failed");
+if (composePagerFrame(pagerTui, mainFrame, 120, 40, pagerDeps) !== mainFrame) throw new Error("pager passthrough (empty) smoke failed");
 
-// Reserved split-pane composition (core-patch path).
-const { composeSplitFrame, splitRegions } = await jiti.import(path.join(root, "extensions/subagent-view/split.ts"));
-
-if (splitRegions(160, 40, true).orientation !== "vertical") throw new Error("splitRegions wide-vertical smoke failed");
-if (splitRegions(160, 40, false).orientation !== "horizontal") throw new Error("splitRegions opt-out smoke failed");
-if (splitRegions(80, 60, true).orientation !== "horizontal") throw new Error("splitRegions tall-horizontal smoke failed");
-
-subagentRegistry.reset();
-subagentRegistry.add("s:1", "explore", "explore");
-subagentRegistry.start("s:1");
-subagentRegistry.update("s:1", { appendText: "scanning files", phase: "writing" });
-subagentRegistry.add("s:2", "review", "reviewer");
-
-const fakeMain = Array.from({ length: 60 }, (_, i) => `main row ${i}`);
-const splitRender = (w) => fakeMain.map((line) => line.slice(0, w));
-
-const hTui = { terminal: { rows: 40, columns: 120 }, requestRender() {}, render: splitRender };
-const hFrame = composeSplitFrame(hTui, fakeMain, 120, 40, () => titaniumTheme, false);
-if (hFrame.length !== 40) throw new Error("split horizontal frame height smoke failed");
-if (!hFrame.slice(0, 20).join("\n").includes("Sub-agents")) throw new Error("split horizontal panel region smoke failed");
-if (!hFrame.slice(20).join("\n").includes("main row 59")) throw new Error("split horizontal main tail smoke failed");
-for (const line of hFrame) if (visibleWidth(line) > 120) throw new Error("split horizontal width smoke failed");
-
-const vTui = { terminal: { rows: 40, columns: 160 }, requestRender() {}, render: splitRender };
-const vFrame = composeSplitFrame(vTui, fakeMain, 160, 40, () => titaniumTheme, true);
-if (vFrame.length !== 40) throw new Error("split vertical frame height smoke failed");
-for (const line of vFrame) if (visibleWidth(line) > 160) throw new Error("split vertical width smoke failed");
-const vText = vFrame.join("\n");
-if (!vText.includes("Sub-agents")) throw new Error("split vertical panel region smoke failed");
-if (!vText.includes("main row 59")) throw new Error("split vertical main region smoke failed");
-if (!vText.includes("│")) throw new Error("split vertical divider smoke failed");
-
-subagentRegistry.reset();
-if (composeSplitFrame(hTui, fakeMain, 120, 40, () => titaniumTheme, false) !== fakeMain) {
-  throw new Error("split passthrough smoke failed");
-}
 
 // TUI render-loop patch: round-trip + idempotence.
 const { patchTuiSource, unpatchTuiSource } = await import(pathToFileURL(path.join(root, "scripts/patch-pi-tui-split.mjs")).href);

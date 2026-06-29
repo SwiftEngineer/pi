@@ -148,6 +148,22 @@ function buildStripModel(
 }
 
 /**
+ * Status-only strip lines for the unpatched overlay fallback (no pager): shows
+ * the channel symbols + selected status, with scroll always reading "live".
+ */
+export function statusStripLines(
+  state: SubagentViewState,
+  theme: Theme,
+  ascii: boolean,
+  width: number,
+  rows: 1 | 2,
+  registry: SubagentRegistry = subagentRegistry,
+): string[] {
+  if (registry.isEmpty()) return [];
+  return renderStrip(buildStripModel(registry, state, theme, ascii, 0, 1), width, theme, rows);
+}
+
+/**
  * Compose the final reserved-layout frame. Returns `mainLines` unchanged when
  * there are no sub-agents or the editor seam can't be found (safe passthrough),
  * so the hook is a cheap no-op at idle and never corrupts the frame.
