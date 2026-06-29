@@ -48,8 +48,6 @@ export interface StripModel {
   percent: number;
   /** Lines hidden below the viewport (for the "N below" readout). */
   linesBelow: number;
-  /** Pager focus is active, so scroll keys are live. */
-  focused: boolean;
   /** Use ASCII glyphs (no-Unicode terminals). */
   ascii: boolean;
 }
@@ -158,19 +156,15 @@ export function renderStrip(model: StripModel, width: number, theme: Theme, rows
   const statusLine = padBetween(chosen.left, chosen.right, width);
 
   if (rows === 1) return [statusLine];
-  return [statusLine, controlsLine(model, width, theme)];
+  return [statusLine, controlsLine(width, theme)];
 }
 
 /** The always-visible controls hint (self-documenting for first-time users). */
-function controlsLine(model: StripModel, width: number, theme: Theme): string {
-  const parts = model.focused
-    ? ["↑↓/PgUp/PgDn scroll", "Home/End top/live", "esc unfocus"]
-    : ["alt+]/[ switch", "alt+1-9 jump", "alt+0 main", "alt+l live", "alt+\\ scroll"];
-  const hint = theme.fg("dim", parts.join(" · "));
+function controlsLine(width: number, theme: Theme): string {
+  const hint = theme.fg("dim", ["PgUp/PgDn scroll", "alt+]/[ switch", "alt+l live"].join(" · "));
   // Compact fallback when the full hint can't fit.
   if (visibleWidth(hint) > width) {
-    const compact = model.focused ? "PgUp/PgDn scroll · esc unfocus" : "alt+]/[ switch · alt+\\ scroll";
-    return truncateToWidth(theme.fg("dim", compact), width, "…", true);
+    return truncateToWidth(theme.fg("dim", "PgUp/PgDn scroll · alt+]/[ switch"), width, "…", true);
   }
   return hint;
 }

@@ -142,7 +142,6 @@ function buildStripModel(
     scrolledUp: below > 0,
     percent: limit > 0 ? Math.round((top / limit) * 100) : 100,
     linesBelow: below,
-    focused: state.focused,
     ascii,
   };
 }

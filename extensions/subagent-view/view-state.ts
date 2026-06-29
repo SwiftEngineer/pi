@@ -1,6 +1,6 @@
 /**
  * View-state controller for the sub-agent pager: which channel is selected,
- * per-channel scroll position, pager focus, unread tracking, and the spinner
+ * per-channel scroll position, unread tracking, and the spinner
  * frame. The main agent is channel 0; sub-agents follow in registry order.
  *
  * Kept separate from the lifecycle wiring (index.ts) and the frame composition
@@ -21,7 +21,6 @@ function revisionOf(agent: SubagentSnapshot): number {
 
 export class SubagentViewState {
   #selectedId: string = MAIN_CHANNEL;
-  #focused = false;
   spinnerFrame = 0;
 
   readonly #scroll = new Map<string, ScrollState>();
@@ -38,10 +37,6 @@ export class SubagentViewState {
     private readonly registry: SubagentRegistry,
     private readonly getTheme: () => Theme,
   ) {}
-
-  get focused(): boolean {
-    return this.#focused;
-  }
 
   get selectedId(): string {
     return this.#selectedId;
@@ -99,14 +94,6 @@ export class SubagentViewState {
 
   selectMain(): void {
     this.select(MAIN_CHANNEL);
-  }
-
-  toggleFocus(): void {
-    this.#focused = !this.#focused;
-  }
-
-  setFocused(focused: boolean): void {
-    this.#focused = focused;
   }
 
   hasNewOutput(id: string): boolean {
@@ -178,7 +165,6 @@ export class SubagentViewState {
   /** Reset to a clean slate for a new agent run. */
   reset(): void {
     this.#selectedId = MAIN_CHANNEL;
-    this.#focused = false;
     this.spinnerFrame = 0;
     this.#scroll.clear();
     this.#buffers.clear();

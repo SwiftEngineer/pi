@@ -13,7 +13,7 @@
  *     `globalThis.__piSplitFrame` hook composes the reserved layout — the editor
  *     and powerline stay pinned (cursor never lost) while the transcript region
  *     is replaced by the active channel's window. Key-only scroll (no mouse
- *     capture) is gated on pager focus so it never steals the editor's keys.
+ *     capture) scrolls the active channel with PgUp/PgDn.
  *   - overlay: when unpatched, a bottom non-capturing overlay shows the status
  *     strip only (no paging); the main scrollback stays native.
  *
@@ -86,24 +86,23 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
     splitGlobals.__piSplitFrame = hook;
   };
 
-  /** Capture key-only scroll while the pager is focused; pass everything else through. */
+  /**
+   * Scroll the active channel directly with PgUp/PgDn — no focus mode. Only
+   * these two keys are intercepted (and only while sub-agents exist), so the
+   * editor keeps every other key, including arrows/Home/End for text editing.
+   */
   const installInput = (ctx: ExtensionContext): void => {
     if (removeInput || typeof ctx.ui.onTerminalInput !== "function") return;
     removeInput = ctx.ui.onTerminalInput((data) => {
+      if (subagentRegistry.isEmpty()) return undefined;
       const view = getState();
-      if (!view.focused || subagentRegistry.isEmpty()) return undefined;
-      const scroll = (fn: () => void): { consume: true } => {
-        fn();
+      const scroll = (delta: number): { consume: true } => {
+        view.scrollActive(delta);
         requestRepaint();
         return { consume: true };
       };
-      if (matchesKey(data, "up")) return scroll(() => view.scrollActive(-1));
-      if (matchesKey(data, "down")) return scroll(() => view.scrollActive(1));
-      if (matchesKey(data, "pageUp")) return scroll(() => view.scrollActive(-view.pageRows()));
-      if (matchesKey(data, "pageDown")) return scroll(() => view.scrollActive(view.pageRows()));
-      if (matchesKey(data, "home") || data === "g") return scroll(() => view.scrollActiveToTop());
-      if (matchesKey(data, "end") || data === "G") return scroll(() => view.scrollActiveToBottom());
-      if (matchesKey(data, "escape")) return scroll(() => view.setFocused(false));
+      if (matchesKey(data, "pageUp")) return scroll(-view.pageRows());
+      if (matchesKey(data, "pageDown")) return scroll(view.pageRows());
       return undefined;
     });
   };
@@ -215,17 +214,6 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
     // Muscle-memory aliases for the previous bindings.
     pi.registerShortcut("alt+s", { description: "Sub-agents: next channel", handler: select((v) => v.cycle(1)) });
     pi.registerShortcut("alt+a", { description: "Sub-agents: previous channel", handler: select((v) => v.cycle(-1)) });
-    pi.registerShortcut("alt+0", { description: "Sub-agents: view main", handler: select((v) => v.selectMain()) });
-    for (let n = 1; n <= 9; n++) {
-      pi.registerShortcut(`alt+${n}` as "alt+1", {
-        description: `Sub-agents: view channel ${n}`,
-        handler: select((v) => {
-          const id = v.channelIds()[n];
-          if (id) v.select(id);
-        }),
-      });
-    }
-    pi.registerShortcut("alt+\\", { description: "Sub-agents: focus to scroll", handler: select((v) => v.toggleFocus()) });
     pi.registerShortcut("alt+l", { description: "Sub-agents: follow latest (live)", handler: select((v) => v.scrollActiveToBottom()) });
   }
 
@@ -244,7 +232,6 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
   // resets stale finished agents when starting a fresh background batch.
   pi.on("agent_start", (_event, ctx) => {
     if (ctx.mode === "tui") latestCtx = ctx;
-    getState().setFocused(false);
     syncSplit();
   });
 

@@ -338,7 +338,7 @@ const { composePagerFrame } = await jiti.import(path.join(root, "extensions/suba
 const { visibleWidth } = await import("@earendil-works/pi-tui");
 
 // Shortcuts the redesigned pager registers (new bindings + muscle-memory aliases).
-for (const shortcut of ["alt+]", "alt+[", "alt+0", "alt+1", "alt+\\", "alt+l", "alt+s", "alt+a"]) {
+for (const shortcut of ["alt+]", "alt+[", "alt+l", "alt+s", "alt+a"]) {
   if (!shortcuts.has(shortcut)) throw new Error(`subagent-view shortcut missing: ${shortcut}`);
 }
 
@@ -366,7 +366,7 @@ const stripModel = {
     { kind: "done", activity: "idle", selected: false, hasNewOutput: true },
   ],
   selectedIndex: 1, selectedLabel: "explore auth", selectedStatus: "reasoning",
-  spinner: true, spinnerFrame: 2, scrolledUp: false, percent: 100, linesBelow: 0, focused: false, ascii: false,
+  spinner: true, spinnerFrame: 2, scrolledUp: false, percent: 100, linesBelow: 0, ascii: false,
 };
 for (const w of [30, 44, 80, 120]) {
   for (const rows of [1, 2]) {
