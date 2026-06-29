@@ -33,6 +33,8 @@ type SplitHook = (tui: HookTui, mainLines: string[], width: number, height: numb
 
 interface SplitGlobals {
   __piSplitFrame?: SplitHook | undefined;
+  /** True only while the split hook is actively replacing the frame. */
+  __piSplitFrameActive?: boolean | undefined;
   __PI_SPLIT_PATCH__?: boolean | undefined;
 }
 
@@ -76,6 +78,8 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
   let state: SubagentViewState | undefined;
   let animationTimer: ReturnType<typeof setInterval> | undefined;
   let removeInput: (() => void) | undefined;
+  let coreHook: SplitHook | undefined;
+  let splitFrameActive = false;
   const isAscii = detectAscii();
 
   // overlay-mode refs
@@ -95,7 +99,7 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
   };
 
   const installCoreHook = (): void => {
-    const hook: SplitHook = (tui, mainLines, width, height) => {
+    coreHook ??= (tui, mainLines, width, height) => {
       lastTui = tui;
       const ctx = latestCtx;
       if (!ctx || subagentRegistry.isEmpty()) return mainLines;
@@ -109,7 +113,21 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
         return mainLines;
       }
     };
-    splitGlobals.__piSplitFrame = hook;
+    splitGlobals.__piSplitFrame = coreHook;
+    splitGlobals.__piSplitFrameActive = splitFrameActive;
+  };
+
+  const uninstallCoreHook = (): void => {
+    splitGlobals.__piSplitFrame = undefined;
+    splitGlobals.__piSplitFrameActive = false;
+  };
+
+  const setSplitFrameActive = (active: boolean): boolean => {
+    const globalActive = splitGlobals.__piSplitFrameActive === true;
+    if (splitFrameActive === active && globalActive === active) return false;
+    splitFrameActive = active;
+    splitGlobals.__piSplitFrameActive = active;
+    return true;
   };
 
   /**
@@ -223,7 +241,11 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
     if (!ctx || ctx.mode !== "tui") return;
     getState().noteRegistryChange();
     if (mode === "core") {
-      requestRepaint();
+      const hasSubagents = !subagentRegistry.isEmpty();
+      const activeChanged = setSplitFrameActive(hasSubagents);
+      if (hasSubagents) installCoreHook();
+      else uninstallCoreHook();
+      if (hasSubagents || activeChanged) requestRepaint();
       syncAnimation();
       return;
     }
@@ -243,7 +265,9 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
       clearInterval(animationTimer);
       animationTimer = undefined;
     }
-    if (splitGlobals.__piSplitFrame) splitGlobals.__piSplitFrame = undefined;
+    uninstallCoreHook();
+    splitGlobals.__piSplitFrameActive = undefined;
+    splitFrameActive = false;
     removeInput?.();
     removeInput = undefined;
     closeOverlay?.();
@@ -276,7 +300,8 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
     latestCtx = ctx;
     mode = splitGlobals.__PI_SPLIT_PATCH__ ? "core" : "overlay";
     if (mode === "core") {
-      installCoreHook();
+      splitFrameActive = false;
+      uninstallCoreHook();
       installInput(ctx);
     }
     syncSplit();
@@ -291,9 +316,9 @@ export default function subagentViewExtension(pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", () => {
     teardown();
-    subagentRegistry.reset();
-    state = undefined;
     latestCtx = undefined;
     mode = undefined;
+    subagentRegistry.reset();
+    state = undefined;
   });
 }

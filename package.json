@@ -22,6 +22,7 @@
       "./extensions/web-search.ts",
       "./extensions/context.ts",
       "./extensions/tui-powerline.ts",
+      "./extensions/animated-pi-header.ts",
       "./extensions/task/index.ts",
       "./extensions/subagent-view/index.ts"
     ],

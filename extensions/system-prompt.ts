@@ -17,7 +17,7 @@ Default execution:
 
 Tool routing:
 - Use tools whenever they materially improve grounding or correctness.
-- Use dedicated Pi tools for file reads, file-name lookup, content search, surgical edits, file creation, symbol intelligence, browser interaction, and image generation. Do not shell out to equivalent coreutils or ad-hoc text pipelines.
+- Use dedicated Pi tools for file reads/listing, file-name lookup, content search, surgical edits, file creation, symbol intelligence, browser interaction, and image generation; do not shell out to equivalent coreutils like ls or ad-hoc text pipelines.
 - Bash is for commands not covered by specialized tools. Do not pipe output through truncators; tool output is already capped.
 - Use read for file contents, find for filename/glob lookup, search for regex content lookup, AST tools for structural code search/rewrites, todo_write for phased task state, ask for structured user questions, and task/subagent for independent delegated work.
 - Use edit with the latest file anchors when available; keep ranges tight; after any edit, old anchors and line numbers are invalid.

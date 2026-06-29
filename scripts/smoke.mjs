@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 const root = path.resolve(import.meta.dirname, "..");
 process.env.PI_TASK_MAX_RUNTIME_MS ??= "100";
 process.env.PI_TASK_KILL_GRACE_MS ??= "50";
-const jiti = createJiti(import.meta.url, { interopDefault: true });
+const jiti = createJiti(import.meta.url, { interopDefault: true, fsCache: false });
 const tools = new Map();
 const commands = new Map();
 const renderers = new Map();
@@ -69,6 +69,7 @@ for (const file of [
   "extensions/web-search.ts",
   "extensions/context.ts",
   "extensions/tui-powerline.ts",
+  "extensions/animated-pi-header.ts",
   "extensions/task/index.ts",
   "extensions/subagent-view/index.ts",
 ]) {
@@ -184,6 +185,36 @@ if (powerlineOutput.lastIndexOf("Smoke Session") <= powerlineOutput.indexOf("76%
 }
 if (!powerlineOutput.includes("\x1b[38;2;248;250;252m\x1b[48;2;239;68;68m 76% ")) {
   throw new Error("powerline footer red context percentage should use white text");
+}
+
+const sessionStartHandlers = handlers.filter((handler) => handler.event === "session_start");
+const animatedHeaderSessionStart = sessionStartHandlers[1];
+if (!animatedHeaderSessionStart) throw new Error("animated Pi header session_start handler smoke failed");
+let capturedHeaderFactory;
+animatedHeaderSessionStart.handler({ type: "session_start", reason: "new" }, {
+  cwd: root,
+  mode: "tui",
+  hasUI: true,
+  ui: {
+    setHeader(factory) { capturedHeaderFactory = factory; },
+  },
+  model: { id: "smoke-model", provider: "smoke", contextWindow: 100000, reasoning: true },
+  sessionManager: {
+    getCwd() { return root; },
+  },
+});
+if (!capturedHeaderFactory) throw new Error("animated Pi header registration smoke failed");
+let headerRenderRequests = 0;
+const animatedHeader = capturedHeaderFactory({ requestRender() { headerRenderRequests++; } }, titaniumTheme);
+try {
+  const animatedHeaderOutput = animatedHeader.render(100).join("\n");
+  for (const expected of ["Welcome back!", "smoke-model", "▀", "▄", "# prompt actions"]) {
+    if (!animatedHeaderOutput.includes(expected)) throw new Error(`animated Pi header smoke failed: ${expected}`);
+  }
+  if (!animatedHeaderOutput.includes("\x1b[38;2;")) throw new Error("animated Pi header should use truecolor gradient escapes");
+  if (headerRenderRequests < 1) throw new Error("animated Pi header should request an initial animation render");
+} finally {
+  animatedHeader.dispose?.();
 }
 
 capturedFooterFactory = undefined;
@@ -352,6 +383,47 @@ const pgUpRelease = "\x1b[5;1:3~";
 if (!matchesKeyFn(pgUpRelease, "pageUp")) throw new Error("pageUp release no longer matches pageUp — revisit double-scroll guard");
 if (!isKeyReleaseFn(pgUpRelease)) throw new Error("pageUp release not detected as key release — double-scroll guard broken");
 if (isKeyReleaseFn("\x1b[5~")) throw new Error("pageUp press misdetected as key release");
+
+// Core split hook is absent while idle so old native-scrollback patches do not
+// treat normal prompt typing as split-frame mode. It is installed only while
+// sub-agents exist, and removed again when the registry empties.
+const subagentSessionStart = handlers.filter((handler) => handler.event === "session_start").at(-1);
+const subagentSessionShutdown = handlers.filter((handler) => handler.event === "session_shutdown").at(-1);
+if (!subagentSessionStart || !subagentSessionShutdown) throw new Error("subagent-view session handlers smoke failed");
+const previousSplitPatchFlag = globalThis.__PI_SPLIT_PATCH__;
+const previousSplitHook = globalThis.__piSplitFrame;
+const previousSplitActive = globalThis.__piSplitFrameActive;
+globalThis.__PI_SPLIT_PATCH__ = true;
+globalThis.__piSplitFrame = undefined;
+globalThis.__piSplitFrameActive = undefined;
+try {
+  let splitRenderRequests = 0;
+  subagentRegistry.reset();
+  subagentSessionStart.handler({ type: "session_start", reason: "new" }, {
+    mode: "tui",
+    hasUI: true,
+    ui: { theme: titaniumTheme, onTerminalInput() { return () => {}; } },
+  });
+  if (globalThis.__piSplitFrame !== undefined) throw new Error("subagent split hook should not install while idle");
+  if (globalThis.__piSplitFrameActive !== false) throw new Error("subagent split hook should be inactive while idle");
+  subagentRegistry.add("active:1", "active agent", "task");
+  if (typeof globalThis.__piSplitFrame !== "function" || globalThis.__piSplitFrameActive !== true) throw new Error("subagent split hook activation smoke failed");
+  const activeSplitHook = globalThis.__piSplitFrame;
+  const activeFrame = activeSplitHook({ terminal: { rows: 10, columns: 80 }, children: [], requestRender() { splitRenderRequests++; } }, ["active"], 80, 10);
+  if (activeFrame.join("|") !== "active") throw new Error("subagent active split hook passthrough smoke failed");
+  subagentRegistry.reset();
+  if (globalThis.__piSplitFrame !== undefined || globalThis.__piSplitFrameActive !== false || splitRenderRequests === 0) {
+    throw new Error("subagent split hook idle reset smoke failed");
+  }
+} finally {
+  subagentSessionShutdown.handler({ type: "session_shutdown" });
+  if (previousSplitPatchFlag === undefined) delete globalThis.__PI_SPLIT_PATCH__;
+  else globalThis.__PI_SPLIT_PATCH__ = previousSplitPatchFlag;
+  if (previousSplitHook === undefined) delete globalThis.__piSplitFrame;
+  else globalThis.__piSplitFrame = previousSplitHook;
+  if (previousSplitActive === undefined) delete globalThis.__piSplitFrameActive;
+  else globalThis.__piSplitFrameActive = previousSplitActive;
+}
 
 // --- registry: append-only transcript keeps full history (not a rolling tail) ---
 subagentRegistry.reset();
@@ -585,6 +657,13 @@ const scrollbackTuiSample = [
   "        // Extract cursor position before applying line resets (marker must be found first)",
   "        const cursorPos = this.extractCursorPosition(newLines, height);",
   "        newLines = this.applyLineResets(newLines);",
+  "        const fullRender = (_clear) => {};",
+  "        const logRedraw = (_reason) => {};",
+  "        // First render - just output everything without clearing (assumes clean screen)",
+  "        if (this.previousLines.length === 0 && !widthChanged && !heightChanged) {",
+  "            fullRender(false);",
+  "            return;",
+  "        }",
   "        if (this.clearOnShrink && newLines.length < this.maxLinesRendered && this.overlayStack.length === 0) {",
   "            fullRender(true);",
   "        }",
@@ -597,8 +676,48 @@ const scrollbackPatchedTui = patchNativeScrollbackTuiSource(scrollbackTuiSample)
 if (patchNativeScrollbackTuiSource(scrollbackPatchedTui) !== scrollbackPatchedTui) throw new Error("native scrollback tui patch idempotence smoke failed");
 if (!scrollbackPatchedTui.includes("this.nativeScrollbackCommittedRows === 0 && newLines.length < this.maxLinesRendered")) throw new Error("native scrollback clearOnShrink guard smoke failed");
 if (scrollbackPatchedTui.indexOf("applyNativeScrollbackFrame") > scrollbackPatchedTui.indexOf("Extract cursor position")) throw new Error("native scrollback frame application order smoke failed");
+if (scrollbackPatchedTui.indexOf("nativeCanOmitCommittedRows") > scrollbackPatchedTui.indexOf("renderNativeScrollbackFrame(width, height, nativeCanOmitCommittedRows)")) throw new Error("native scrollback reset-before-render smoke failed");
+if (!scrollbackPatchedTui.includes("child.renderNativeScrollbackFrame") || scrollbackPatchedTui.includes("getNativeScrollbackStableLineCount(width, height")) throw new Error("native scrollback lazy child frame smoke failed");
+if (!scrollbackPatchedTui.includes("this.overlayStack?.length")) throw new Error("native scrollback overlay full-render trigger smoke failed");
+if (!scrollbackPatchedTui.includes("nativeSplitFrameActive") || !scrollbackPatchedTui.includes("__piSplitFrameActive !== false")) throw new Error("native scrollback split-active guard smoke failed");
+if (!scrollbackPatchedTui.includes("PI_NATIVE_SCROLLBACK_PATCH:reset-full-render") || !scrollbackPatchedTui.includes('logRedraw("native scrollback reset")')) throw new Error("native scrollback reset full-render smoke failed");
+if (!scrollbackPatchedTui.includes("if (resetNativeScrollback) {\n            this.nativeScrollbackCommittedRows = 0;\n            this.previousLines = [];")) throw new Error("native scrollback reset state clearing smoke failed");
+const eagerSplitNativeTui = scrollbackPatchedTui.replace(
+  "        const nativeSplitFrameActive = Boolean(globalThis.__piSplitFrame) && globalThis.__piSplitFrameActive !== false;\n        const nativeCanOmitCommittedRows = !(widthChanged || heightChanged || nativeSplitFrameActive || ((this.overlayStack?.length ?? 0) > 0));\n",
+  "        const nativeCanOmitCommittedRows = !(widthChanged || heightChanged || globalThis.__piSplitFrame || ((this.overlayStack?.length ?? 0) > 0));\n",
+);
+const upgradedEagerSplitNativeTui = patchNativeScrollbackTuiSource(eagerSplitNativeTui);
+if (!upgradedEagerSplitNativeTui.includes("nativeSplitFrameActive") || upgradedEagerSplitNativeTui.includes("globalThis.__piSplitFrame ||")) throw new Error("native scrollback eager-split upgrade smoke failed");
+const legacyNativeMethods = [
+  "    // PI_NATIVE_SCROLLBACK_PATCH:methods:start",
+  "    renderNativeScrollbackFrame(width, height) {",
+  "        const lines = this.render(width);",
+  "        return { lines, stablePrefixLineCount: 0 };",
+  "    }",
+  "    applyNativeScrollbackFrame(lines, stablePrefixLineCount, height, widthChanged, heightChanged) {",
+  "        return lines;",
+  "    }",
+  "    // PI_NATIVE_SCROLLBACK_PATCH:methods:end",
+  "",
+].join("\n");
+const legacyNativeTui = scrollbackPatchedTui.replace(/    \/\/ PI_NATIVE_SCROLLBACK_PATCH:methods:start\n[\s\S]*?    \/\/ PI_NATIVE_SCROLLBACK_PATCH:methods:end\n/, legacyNativeMethods);
+const upgradedNativeTui = patchNativeScrollbackTuiSource(legacyNativeTui);
+if (!upgradedNativeTui.includes("canOmitCommittedRows = true") || upgradedNativeTui.includes("const lines = this.render(width);")) throw new Error("native scrollback old-patch upgrade smoke failed");
+const { TUI: SmokeNativeTui } = await import(`data:text/javascript,${encodeURIComponent(scrollbackPatchedTui)}`);
+const prefixedTui = new SmokeNativeTui();
+let nativeCommittedSeen = "not called";
+prefixedTui.nativeScrollbackCommittedRows = 3;
+prefixedTui.children = [
+  { render() { return ["prefix"]; } },
+  { renderNativeScrollbackFrame(_width, committedRows) { nativeCommittedSeen = committedRows; return { lines: ["stable", "live"], stablePrefixLineCount: 1, resetRequired: false }; } },
+];
+let prefixedFrame = prefixedTui.renderNativeScrollbackFrame(80, 10, true);
+if (!prefixedFrame.resetRequired || nativeCommittedSeen !== "not called") throw new Error("native scrollback non-prefix reset smoke failed");
+prefixedFrame = prefixedTui.renderNativeScrollbackFrame(80, 10, false);
+if (nativeCommittedSeen !== 0 || prefixedFrame.stablePrefixLineCount !== 0 || prefixedFrame.lines.join("|") !== "prefix|stable|live") throw new Error("native scrollback non-prefix full-frame smoke failed");
 
 const toolExecutionSample = [
+  "import { Box, Container, getCapabilities, Image, Spacer, Text } from \"@earendil-works/pi-tui\";",
   "class ToolExecutionComponent {",
   "    hideComponent = false;",
   "    constructor(toolName, toolCallId, args, options = {}, toolDefinition, ui, cwd) {",
@@ -613,20 +732,50 @@ const toolExecutionSample = [
   "        this.maybeConvertImagesForKitty();",
   "    }",
   "    render(width) {",
-  "        if (this.hideComponent) return [];",
-  "        const contentLines = this.selfRenderContainer.render(width);",
-  "        const lines = [];",
+  "        if (this.hideComponent) {",
+  "            return [];",
+  "        }",
+  "        if (this.hasRendererDefinition() && this.getRenderShell() === \"self\") {",
+  "            const contentLines = this.selfRenderContainer.render(width);",
+  "            if (contentLines.length === 0 && this.imageComponents.length === 0) {",
+  "                return [];",
+  "            }",
+  "            const lines = [];",
   "            if (contentLines.length > 0) {",
   "                lines.push(\"\");",
   "                lines.push(...contentLines);",
   "            }",
-  "        return lines;",
+  "            for (let i = 0; i < this.imageComponents.length; i++) {",
+  "                const spacer = this.imageSpacers[i];",
+  "                if (spacer) {",
+  "                    lines.push(...spacer.render(width));",
+  "                }",
+  "                const imageComponent = this.imageComponents[i];",
+  "                if (imageComponent) {",
+  "                    lines.push(...imageComponent.render(width));",
+  "                }",
+  "            }",
+  "            return lines;",
+  "        }",
+  "        return super.render(width);",
   "    }",
+  "    updateDisplay() {}",
   "}",
 ].join("\n");
 const patchedToolExecution = patchToolExecutionSource(toolExecutionSample);
 if (patchToolExecutionSource(patchedToolExecution) !== patchedToolExecution) throw new Error("tool execution patch idempotence smoke failed");
 if (!patchedToolExecution.includes("markFinal") || patchedToolExecution.includes("this.addChild(new Spacer(1));")) throw new Error("tool execution live/final spacing smoke failed");
+if (!patchedToolExecution.includes("tool-frame-render") || !patchedToolExecution.includes("toolFrameBashCallLines")) throw new Error("tool execution frame render smoke failed");
+if (!patchedToolExecution.includes("truncateToWidth") || !patchedToolExecution.includes("visibleWidth")) throw new Error("tool execution width helpers smoke failed");
+if (!patchedToolExecution.includes("tool-frame-background") || !patchedToolExecution.includes("theme.bg(this.toolFrameBgColor(), line)") || !patchedToolExecution.includes("this.toolFrameBg(this.toolFrameRule")) throw new Error("tool execution frame background smoke failed");
+const legacyToolExecutionFrame = patchedToolExecution
+  .replace(/    toolFrameBgColor\(\) \{[\s\S]*?    \/\/ PI_NATIVE_SCROLLBACK_PATCH:tool-frame-background\n/, "")
+  .replaceAll('this.toolFrameBg(this.toolFrameRule(frameWidth, "top", " " + this.toolFrameTitle() + " "))', 'this.toolFrameRule(frameWidth, "top", " " + this.toolFrameTitle() + " ")')
+  .replaceAll('this.toolFrameBg(this.toolFrameBodyLine(frameWidth, line))', 'this.toolFrameBodyLine(frameWidth, line)')
+  .replaceAll('this.toolFrameBg(this.toolFrameRule(frameWidth, "middle", " Output "))', 'this.toolFrameRule(frameWidth, "middle", " Output ")')
+  .replaceAll('this.toolFrameBg(this.toolFrameRule(frameWidth, "bottom"))', 'this.toolFrameRule(frameWidth, "bottom")');
+const upgradedToolExecutionFrame = patchToolExecutionSource(legacyToolExecutionFrame);
+if (!upgradedToolExecutionFrame.includes("tool-frame-background") || !upgradedToolExecutionFrame.includes("this.toolFrameBg(this.toolFrameRule")) throw new Error("tool execution old-frame background upgrade smoke failed");
 
 const interactiveModeSample = [
   "import { ToolExecutionComponent } from \"./components/tool-execution.js\";",
@@ -663,9 +812,31 @@ const liveTool = { render() { return ["tool", "tail"]; }, transcriptWantsLeading
 transcript.addChild(stableChild);
 transcript.addChild(liveTool);
 transcript.markLive(liveTool);
-if (transcript.getNativeScrollbackStableLineCount(80) !== 1) throw new Error("transcript live-prefix smoke failed");
+let transcriptFrame = transcript.renderNativeScrollbackFrame(80, 0);
+if (transcriptFrame.stablePrefixLineCount !== 1 || transcriptFrame.lines.join("|") !== "stable||tool|tail") throw new Error("transcript live-prefix smoke failed");
 transcript.markFinal(liveTool);
-if (transcript.getNativeScrollbackStableLineCount(80) !== 4) throw new Error("transcript finalization smoke failed");
+transcriptFrame = transcript.renderNativeScrollbackFrame(80, 0);
+if (transcriptFrame.stablePrefixLineCount !== 4 || transcriptFrame.lines.join("|") !== "stable||tool|tail") throw new Error("transcript finalization smoke failed");
+
+let stableRenderCount = 0;
+const lazyTranscript = new TranscriptContainer();
+const countedStable = { render() { stableRenderCount++; return ["s1", "s2"]; } };
+const countedLive = { render() { return ["live"]; }, transcriptWantsLeadingSpacer() { return true; } };
+lazyTranscript.addChild(countedStable);
+lazyTranscript.addChild(countedLive);
+lazyTranscript.markLive(countedLive);
+transcriptFrame = lazyTranscript.renderNativeScrollbackFrame(80, 0);
+if (stableRenderCount !== 1 || transcriptFrame.lines.join("|") !== "s1|s2||live") throw new Error("transcript initial lazy render smoke failed");
+transcriptFrame = lazyTranscript.renderNativeScrollbackFrame(80, 2);
+if (stableRenderCount !== 1 || transcriptFrame.lines.join("|") !== "|live" || transcriptFrame.stablePrefixLineCount !== 0 || transcriptFrame.omittedRows !== 2) throw new Error("transcript committed stable omission smoke failed");
+
+const partialTranscript = new TranscriptContainer();
+partialTranscript.addChild({ render() { return ["a", "b", "c"]; } });
+transcriptFrame = partialTranscript.renderNativeScrollbackFrame(80, 1);
+if (transcriptFrame.lines.join("|") !== "b|c" || transcriptFrame.stablePrefixLineCount !== 2 || transcriptFrame.omittedRows !== 1) throw new Error("transcript partial omission smoke failed");
+
+transcriptFrame = lazyTranscript.renderNativeScrollbackFrame(80, 99);
+if (!transcriptFrame.resetRequired || transcriptFrame.lines.join("|") !== "s1|s2||live") throw new Error("transcript over-omission reset smoke failed");
 
 const nativeState = {
   nativeScrollbackCommittedRows: 0,
@@ -678,6 +849,36 @@ const nativeState = {
 const managedLines = applyNativeScrollbackFrameForTest(nativeState, Array.from({ length: 60 }, (_, i) => `new ${i}`), 50, 10);
 if (managedLines.length !== 10 || nativeState.nativeScrollbackCommittedRows !== 50 || nativeState.maxLinesRendered !== 10) throw new Error("native scrollback viewport-tail smoke failed");
 if (nativeState.maxLinesRendered > managedLines.length) throw new Error("native scrollback live tool update would trigger clear-on-shrink smoke failed");
+const deltaState = {
+  nativeScrollbackCommittedRows: 50,
+  previousLines: Array.from({ length: 12 }, (_, i) => `old delta ${i}`),
+  cursorRow: 11,
+  hardwareCursorRow: 11,
+  previousViewportTop: 2,
+  maxLinesRendered: 12,
+};
+const deltaLines = applyNativeScrollbackFrameForTest(deltaState, Array.from({ length: 12 }, (_, i) => `new delta ${i}`), 2, 10);
+if (deltaLines.length !== 10 || deltaState.nativeScrollbackCommittedRows !== 52 || deltaState.nativeScrollbackLastDelta !== 2) throw new Error("native scrollback delta-commit smoke failed");
+const boundedState = {
+  nativeScrollbackCommittedRows: 20,
+  previousLines: Array.from({ length: 11 }, (_, i) => `old bounded ${i}`),
+  cursorRow: 10,
+  hardwareCursorRow: 10,
+  previousViewportTop: 1,
+  maxLinesRendered: 11,
+};
+const boundedLines = applyNativeScrollbackFrameForTest(boundedState, Array.from({ length: 12 }, (_, i) => `new bounded ${i}`), 5, 10);
+if (boundedLines.length !== 11 || boundedState.nativeScrollbackCommittedRows !== 21 || boundedState.nativeScrollbackLastDelta !== 1) throw new Error("native scrollback delta previous-frame bound smoke failed");
+const maxLinesBeforeReset = deltaState.maxLinesRendered;
+const previousLineCountBeforeReset = deltaState.previousLines.length;
+const resetLines = applyNativeScrollbackFrameForTest(deltaState, ["full"], 0, 10, { resetNativeScrollback: true });
+if (
+  resetLines.length !== 1 ||
+  deltaState.nativeScrollbackCommittedRows !== 0 ||
+  deltaState.maxLinesRendered !== maxLinesBeforeReset ||
+  deltaState.previousLines.length !== previousLineCountBeforeReset ||
+  deltaState.nativeScrollbackLastDelta !== 0
+) throw new Error("native scrollback reset smoke failed");
 
 for (const required of ["search", "ast_grep", "ast_edit", "todo_write", "ask", "web_search", "task"]) {
   if (!tools.has(required)) throw new Error(`missing tool: ${required}`);
