@@ -103,8 +103,9 @@ export function gradientEscape(t: number, shine?: ShineConfig): string {
   if (shineStrength > 0) {
     const dist = Math.abs(t - shinePos);
     const intensity = Math.max(0, 1 - dist / SHINE_HALF_WIDTH) * shineStrength;
-    // Promote to the brightest ramp slot when the shine band peaks here.
+    // Promote strongly at the intro peak, and lift only the settled peak.
     if (intensity > 0.5) idx = ramp.length - 1;
+    else if (intensity > 0.09) idx = Math.min(ramp.length - 1, idx + 1);
   }
   return `\x1b[38;5;${ramp[idx]}m`;
 }
@@ -120,7 +121,7 @@ export function gradientLogo(lines: readonly string[], phase = 0, shine?: ShineC
   const rows = lines.length;
   const cols = Math.max(...lines.map(l => l.length));
   // span+1 so `base` stays strictly < 1: avoids the wrap-around at the
-  // far corner mapping back to t=0 (hot pink) on the resting frame.
+  // far corner mapping back to t=0 (hot pink) on the base frame.
   const span = Math.max(1, cols + rows - 1);
   return lines.map((line, y) => {
     let result = "";
@@ -139,31 +140,47 @@ export function gradientLogo(lines: readonly string[], phase = 0, shine?: ShineC
   });
 }
 
-/** Total length of the intro animation. */
+/** Total length of the fast intro animation. */
 const INTRO_MS = 3000;
 /** Render cadence during the intro (~30fps). */
 const INTRO_TICK_MS = 33;
+/** Render cadence once the logo has settled into its quiet shimmer. */
+const SETTLED_TICK_MS = 100;
+/** Duration of one subtle shine pass after the intro settles. */
+const SETTLED_SHIMMER_MS = 6000;
+/** Subtle shine opacity retained after the intro. */
+const SETTLED_SHINE_STRENGTH = 0.14;
 /** Number of full gradient rotations the sweep performs before settling. */
 const INTRO_SWEEPS = 2.5;
 /** Number of times the shine highlight crosses the diagonal across the intro. */
 const INTRO_SHINE_TRAVERSALS = 3;
 
+function wrapUnit(value: number): number {
+  return ((value % 1) + 1) % 1;
+}
+
 /**
  * Logo frame for a normalized intro progress in [0, 1).
  *
- * Ease-out cubic so the spin decelerates into the resting state. The gradient
- * sweeps backward through INTRO_SWEEPS full rotations (`eased == 1` → phase =
- * 0 = resting frame) while the shine traverses the diagonal at a steady pace,
- * decoupled from the gradient phase so the two layers parallax; its strength
- * fades with the same ease-out curve so the highlight is gone by the resting
- * frame.
+ * Ease-out cubic so the spin decelerates into the settled shimmer. The
+ * gradient sweeps backward through INTRO_SWEEPS full rotations (`eased == 1` →
+ * phase = 0 = settled base frame) while the shine traverses the diagonal at a
+ * steady pace, decoupled from the gradient phase so the two layers parallax;
+ * its strength fades with the same ease-out curve down to the quiet settled
+ * shimmer strength.
  */
-function introLogoFrame(progress: number): string[] {
+function introLogoFrame(progress: number, lines: readonly string[] = PI_LOGO): string[] {
   const eased = 1 - (1 - progress) ** 3;
-  const phase = ((((1 - eased) * INTRO_SWEEPS) % 1) + 1) % 1;
-  const shinePos = (((progress * INTRO_SHINE_TRAVERSALS) % 1) + 1) % 1;
-  const shineStrength = (1 - eased) ** 1.5;
-  return gradientLogo(PI_LOGO, phase, { strength: shineStrength, pos: shinePos });
+  const phase = wrapUnit((1 - eased) * INTRO_SWEEPS);
+  const shinePos = wrapUnit(progress * INTRO_SHINE_TRAVERSALS);
+  const shineStrength = SETTLED_SHINE_STRENGTH +
+    (1 - SETTLED_SHINE_STRENGTH) * (1 - eased) ** 1.5;
+  return gradientLogo(lines, phase, { strength: shineStrength, pos: shinePos });
+}
+
+function settledLogoFrame(settledElapsedMs: number, lines: readonly string[] = PI_LOGO): string[] {
+  const shinePos = wrapUnit(settledElapsedMs / SETTLED_SHIMMER_MS);
+  return gradientLogo(lines, 0, { strength: SETTLED_SHINE_STRENGTH, pos: shinePos });
 }
 
 export class AnimatedPiHeaderComponent implements Component {
@@ -183,25 +200,40 @@ export class AnimatedPiHeaderComponent implements Component {
   }
 
   /**
-   * Play a one-shot intro that sweeps the gradient through every phase
-   * before settling on the resting frame. Safe to call multiple times —
-   * subsequent calls reset and replay.
+   * Play the fast intro, then continue with the quiet settled shimmer. Safe to
+   * call multiple times — subsequent calls reset and replay.
    */
   playIntro(requestRender: () => void): void {
     this.#stopAnimation();
     this.#animStart = performance.now();
     requestRender();
     this.#animTimer = setInterval(() => {
-      const elapsed = performance.now() - (this.#animStart ?? 0);
+      const start = this.#animStart;
+      if (start == null) return;
+      const elapsed = performance.now() - start;
       if (elapsed >= INTRO_MS) {
-        this.#stopAnimation();
+        this.#startSettledShimmer(requestRender);
+        return;
       }
       requestRender();
     }, INTRO_TICK_MS);
+    this.#animTimer.unref?.();
   }
 
   dispose(): void {
     this.#stopAnimation();
+  }
+
+  #startSettledShimmer(requestRender: () => void): void {
+    if (this.#animTimer != null) {
+      clearInterval(this.#animTimer);
+      this.#animTimer = null;
+    }
+    requestRender();
+    this.#animTimer = setInterval(() => {
+      requestRender();
+    }, SETTLED_TICK_MS);
+    this.#animTimer.unref?.();
   }
 
   #stopAnimation(): void {
@@ -210,7 +242,6 @@ export class AnimatedPiHeaderComponent implements Component {
       this.#animTimer = null;
     }
     this.#animStart = null;
-    // The settled (resting) frame differs from the last intro frame.
     this.invalidate();
   }
 
@@ -227,7 +258,7 @@ export class AnimatedPiHeaderComponent implements Component {
       : `${MODEL_ICON} no model selected`;
     const cwd = formatDirectory(this.ctx.sessionManager.getCwd?.() ?? this.ctx.cwd);
     const cwdLine = `${DIRECTORY_ICON} ${sanitizeInline(cwd)}`;
-    const hintLine = "/ commands  ·  ! bash  ·  # prompt actions";
+    const hintLine = "/ commands  ·  @ files  ·  ! bash + send  ·  !! bash local";
 
     return [
       this.#centerText(this.theme.fg("accent", title), contentWidth),
@@ -241,17 +272,17 @@ export class AnimatedPiHeaderComponent implements Component {
   }
 
   #renderTiny(width: number): string[] {
-    const mark = withThemeColorMode(this.theme, () => gradientLogo(["π"], 0)[0] ?? "π");
+    const mark = this.#currentLogoFrame(["π"])[0] ?? "π";
     return [this.#fitToWidth(this.#centerText(mark, width), width)];
   }
 
-  /** Pick the logo frame for the current intro phase, or the resting frame. */
-  #currentLogoFrame(): readonly string[] {
+  /** Pick the logo frame for the current intro phase or settled shimmer. */
+  #currentLogoFrame(lines: readonly string[] = PI_LOGO): readonly string[] {
     return withThemeColorMode(this.theme, () => {
-      if (this.#animStart == null) return gradientLogo(PI_LOGO, 0);
-      const elapsed = performance.now() - this.#animStart;
-      if (elapsed >= INTRO_MS) return gradientLogo(PI_LOGO, 0);
-      return introLogoFrame(elapsed / INTRO_MS);
+      if (this.#animStart == null) return gradientLogo(lines, 0);
+      const elapsed = Math.max(0, performance.now() - this.#animStart);
+      if (elapsed >= INTRO_MS) return settledLogoFrame(elapsed - INTRO_MS, lines);
+      return introLogoFrame(elapsed / INTRO_MS, lines);
     });
   }
 

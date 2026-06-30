@@ -44,6 +44,7 @@ The smoke harness covers these current behaviors:
 - context command and `context-usage` renderer
 - settings `TabBar`
 - settings patch behavior
+- startup resource display patch behavior
 - TUI split patch behavior
 - native scrollback patch behavior
 - sub-agent registry, view state, strip, frame, and transcript behavior

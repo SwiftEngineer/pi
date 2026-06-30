@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "SwiftEngineer Pi harness package: compact prompt, policy, task/subagents, search, AST, web search, todos, and ask tools.",
+  "description": "SwiftEngineer Pi harness package: compact prompt, policy, task/subagents, search, AST, web search/fetch, deep-research skill, todos, and ask tools.",
   "keywords": ["pi-package"],
   "license": "MIT",
   "scripts": {
@@ -20,6 +20,7 @@
       "./extensions/todo-write.ts",
       "./extensions/ask.ts",
       "./extensions/web-search.ts",
+      "./extensions/web-fetch.ts",
       "./extensions/context.ts",
       "./extensions/tui-powerline.ts",
       "./extensions/animated-pi-header.ts",

@@ -208,9 +208,10 @@ let headerRenderRequests = 0;
 const animatedHeader = capturedHeaderFactory({ requestRender() { headerRenderRequests++; } }, titaniumTheme);
 try {
   const animatedHeaderOutput = animatedHeader.render(100).join("\n");
-  for (const expected of ["Welcome back!", "smoke-model", "▀", "▄", "# prompt actions"]) {
+  for (const expected of ["Welcome back!", "smoke-model", "▀", "▄", "/ commands", "@ files", "! bash + send", "!! bash local"]) {
     if (!animatedHeaderOutput.includes(expected)) throw new Error(`animated Pi header smoke failed: ${expected}`);
   }
+  if (animatedHeaderOutput.includes("# prompt actions")) throw new Error("animated Pi header should not show stale prompt-actions hint");
   if (!animatedHeaderOutput.includes("\x1b[38;2;")) throw new Error("animated Pi header should use truecolor gradient escapes");
   if (headerRenderRequests < 1) throw new Error("animated Pi header should request an initial animation render");
 } finally {
@@ -361,6 +362,28 @@ const restoredSettingsManager = patchSettingsManager(upstreamSettingsManager);
 if (!restoredSettingsManager.includes('return this.settings.transport ?? "sse";')) throw new Error("settings manager transport default smoke failed");
 if (patchSettingsManager(restoredSettingsManager) !== restoredSettingsManager) throw new Error("settings manager transport default idempotence smoke failed");
 
+const { patchStartupResourceDisplaySource } = await import(pathToFileURL(path.join(root, "scripts/patch-pi-startup-resources.mjs")).href);
+const startupResourceSample = [
+  "export function names() {",
+  "    const added = [];",
+  "        const addLoadedSection = (name, collapsedBody, expandedBody = collapsedBody, color = \"mdHeading\") => {",
+  "            added.push(name);",
+  "        };",
+  "        addLoadedSection(\"Context\", \"context\");",
+  "        addLoadedSection(\"Skills\", \"skills\");",
+  "        addLoadedSection(\"Prompts\", \"prompts\");",
+  "        addLoadedSection(\"Extensions\", \"extensions\");",
+  "        addLoadedSection(\"Themes\", \"themes\");",
+  "    return added;",
+  "}",
+  "",
+].join("\n");
+const patchedStartupResourceSample = patchStartupResourceDisplaySource(startupResourceSample);
+if (patchStartupResourceDisplaySource(patchedStartupResourceSample) !== patchedStartupResourceSample) throw new Error("startup resource display patch idempotence smoke failed");
+if (!patchedStartupResourceSample.includes('name === "Skills" || name === "Extensions" || name === "Themes"')) throw new Error("startup resource display patch guard smoke failed");
+const { names: startupResourceNames } = await import(`data:text/javascript,${encodeURIComponent(patchedStartupResourceSample)}`);
+const visibleStartupResourceSections = startupResourceNames().join(",");
+if (visibleStartupResourceSections !== "Context,Prompts") throw new Error(`startup resource display patch smoke failed: ${visibleStartupResourceSections}`);
 
 const { subagentRegistry } = await jiti.import(path.join(root, "extensions/subagent-view/registry.ts"));
 const { renderStrip, bannerLine } = await jiti.import(path.join(root, "extensions/subagent-view/strip.ts"));

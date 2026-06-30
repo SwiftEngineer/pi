@@ -44,11 +44,12 @@ Development dependencies pin the Pi packages at version `0.80.2`.
 3. Runs `npm install`.
 4. Installs the global Pi package with `npm install -g --ignore-scripts`.
 5. Runs the settings patch script.
-6. Runs the TUI split patch script.
-7. Runs the native scrollback patch script.
-8. Refreshes the shell command hash table with `hash -r`.
-9. Checks that `pi` is available.
-10. Runs `pi install "$ROOT"`.
+6. Runs the startup resource display patch script.
+7. Runs the TUI split patch script.
+8. Runs the native scrollback patch script.
+9. Refreshes the shell command hash table with `hash -r`.
+10. Checks that `pi` is available.
+11. Runs `pi install "$ROOT"`.
 
 The global Pi package defaults to `@earendil-works/pi-coding-agent@0.80.2`. The `PI_PACKAGE` environment variable overrides that value.
 
@@ -60,10 +61,11 @@ The global Pi package defaults to `@earendil-works/pi-coding-agent@0.80.2`. The 
 2. Runs `npm install`.
 3. Installs the global Pi package with `npm install -g --ignore-scripts`.
 4. Runs the settings patch script.
-5. Runs the TUI split patch script.
-6. Runs the native scrollback patch script.
-7. Refreshes the shell command hash table with `hash -r`.
-8. Runs `pi install "$ROOT"`.
+5. Runs the startup resource display patch script.
+6. Runs the TUI split patch script.
+7. Runs the native scrollback patch script.
+8. Refreshes the shell command hash table with `hash -r`.
+9. Runs `pi install "$ROOT"`.
 
 The global Pi package defaults to `@earendil-works/pi-coding-agent@0.80.2`. The `PI_PACKAGE` environment variable overrides that value.
 
@@ -78,6 +80,15 @@ Patch scripts read installed Pi package files, apply text transformations, and w
 ### `scripts/patch-pi-settings.mjs`
 
 Patches the installed Pi settings selector. It adds tabbed settings behavior and provider settings entries for transport and HTTP idle timeout when needed.
+
+Target resolution uses:
+
+- `PI_CODING_AGENT_DIR` when set
+- otherwise the global npm root joined with `@earendil-works/pi-coding-agent`
+
+### `scripts/patch-pi-startup-resources.mjs`
+
+Patches Pi's interactive startup resource listing to hide the `[Skills]`, `[Extensions]`, and `[Themes]` sections while leaving those resources loaded.
 
 Target resolution uses:
 
