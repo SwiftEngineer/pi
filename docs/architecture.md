@@ -43,7 +43,7 @@ The main patterns are:
 - `extensions/settings/` contains the reusable `TabBar` component used by settings UI code and smoke tests.
 - `scripts/` contains smoke testing, postinstall checks, and patch scripts for installed Pi package files.
 - `themes/titanium.json` contains the titanium theme.
-- `install.sh` and `update.sh` install dependencies, install Pi globally, apply patches, and run `pi install` for this harness.
+- `install.sh` and `update.sh` install dependencies, install the `pi` binary (from `pi_agent_rust`), and run `pi install` for this harness. They do not apply patches; the patch scripts target the Node Pi host only.
 
 ## TypeScript configuration
 

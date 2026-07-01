@@ -9,23 +9,22 @@
   "scripts": {
     "check": "tsc --noEmit",
     "smoke": "node scripts/smoke.mjs",
+    "smoke:pijs": "node pijs/smoke.mjs",
     "postinstall": "node scripts/postinstall.mjs"
   },
   "pi": {
     "extensions": [
-      "./extensions/system-prompt.ts",
-      "./extensions/tool-policy.ts",
-      "./extensions/search.ts",
-      "./extensions/ast-tools.ts",
-      "./extensions/todo-write.ts",
-      "./extensions/ask.ts",
-      "./extensions/web-search.ts",
-      "./extensions/web-fetch.ts",
-      "./extensions/context.ts",
-      "./extensions/tui-powerline.ts",
-      "./extensions/animated-pi-header.ts",
-      "./extensions/task/index.ts",
-      "./extensions/subagent-view/index.ts"
+      "./pijs/system-prompt.ts",
+      "./pijs/tool-policy.ts",
+      "./pijs/search.ts",
+      "./pijs/ast-tools.ts",
+      "./pijs/todo-write.ts",
+      "./pijs/ask.ts",
+      "./pijs/web-search.ts",
+      "./pijs/web-fetch.ts",
+      "./pijs/task/index.ts",
+      "./pijs/subagent-view/index.ts",
+      "./pijs/tui-powerline.ts"
     ],
     "skills": ["./skills"],
     "prompts": ["./prompts"],

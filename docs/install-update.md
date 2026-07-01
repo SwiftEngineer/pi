@@ -1,6 +1,6 @@
 # Installation, update, and patching
 
-This repository includes shell entry points for installing and updating the harness with a global Pi package.
+This repository includes shell entry points for installing and updating the harness. The install and update scripts fetch and run the `pi_agent_rust` installer, which installs the `pi` binary (a Rust release build) and registers this harness package with it.
 
 ## Runtime requirements
 
@@ -14,8 +14,9 @@ This repository includes shell entry points for installing and updating the harn
 - `node`
 - `npm`
 - `git`
+- `curl`
 
-`install.sh` also checks the Node version at runtime.
+`install.sh` also checks the Node version at runtime (`>=22.19.0`). `curl` is required because the scripts fetch the `pi_agent_rust` installer over HTTPS.
 
 ## Dependencies
 
@@ -39,41 +40,43 @@ Development dependencies pin the Pi packages at version `0.80.2`.
 
 `install.sh` performs these steps from the repository root:
 
-1. Checks required commands.
-2. Checks Node version.
-3. Runs `npm install`.
-4. Installs the global Pi package with `npm install -g --ignore-scripts`.
-5. Runs the settings patch script.
-6. Runs the startup resource display patch script.
-7. Runs the TUI split patch script.
-8. Runs the native scrollback patch script.
-9. Refreshes the shell command hash table with `hash -r`.
-10. Checks that `pi` is available.
-11. Runs `pi install "$ROOT"`.
+1. Checks required commands (`node`, `npm`, `git`, `curl`).
+2. Checks Node version (`>=22.19.0`).
+3. Runs `npm install` to install this harness package's dependencies (including `@ast-grep/cli`).
+4. Installs the `pi` binary by fetching and running the `pi_agent_rust` installer:
 
-The global Pi package defaults to `@earendil-works/pi-coding-agent@0.80.2`. The `PI_PACKAGE` environment variable overrides that value.
+   ```sh
+   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/pi_agent_rust/main/install.sh?$( date +%s )" | bash
+   ```
+
+   with `YES=1` and `NO_GUM=1` exported by default. The `pi_agent_rust` installer migrates any pre-existing TypeScript Pi installation (aliasing the old binary `legacy-pi`) and is idempotent, so re-running it is safe.
+5. Refreshes the shell command hash table with `hash -r`.
+6. Checks that `pi` is available.
+7. Registers this harness package with `pi`, trying `pi install "$ROOT"` first and falling back to `pi install -l "$ROOT"` if that fails.
+8. Prints the success message.
+
+The four `scripts/patch-pi-*.mjs` scripts are intentionally not run here (see [Patch scripts](#patch-scripts)).
 
 ## `update.sh`
 
 `update.sh` performs these steps from the repository root:
 
 1. If the repository has a configured upstream, runs `git pull --ff-only`.
-2. Runs `npm install`.
-3. Installs the global Pi package with `npm install -g --ignore-scripts`.
-4. Runs the settings patch script.
-5. Runs the startup resource display patch script.
-6. Runs the TUI split patch script.
-7. Runs the native scrollback patch script.
-8. Refreshes the shell command hash table with `hash -r`.
-9. Runs `pi install "$ROOT"`.
+2. Runs `npm install` to refresh this harness package's dependencies.
+3. Re-runs the `pi_agent_rust` installer (the same `curl … | bash` one-liner as `install.sh`). Because the installer is idempotent, this doubles as a `pi` binary upgrade.
+4. Refreshes the shell command hash table with `hash -r`.
+5. Registers this harness package with `pi`, trying `pi install "$ROOT"` first and falling back to `pi install -l "$ROOT"` if that fails.
+6. Prints the success message.
 
-The global Pi package defaults to `@earendil-works/pi-coding-agent@0.80.2`. The `PI_PACKAGE` environment variable overrides that value.
+The four `scripts/patch-pi-*.mjs` scripts are intentionally not run here (see [Patch scripts](#patch-scripts)).
 
 ## Postinstall check
 
 `scripts/postinstall.mjs` checks whether the local ast-grep executable exists at `node_modules/.bin/sg` or `node_modules/.bin/sg.cmd` on Windows. If it is absent, the script prints a warning that AST tools will fail until dependencies are installed.
 
 ## Patch scripts
+
+> **Note.** These patch scripts are **no longer invoked by `install.sh` or `update.sh`**. They mutate the compiled `dist/` output of the Node Pi host (`@earendil-works/pi-coding-agent` / `pi-tui`), which the `pi` Rust binary installed by the current scripts does not ship; running them against the Rust binary throws because their anchor strings are not found. The `.mjs` files are kept on disk for the legacy/dual-target Node flow (see [Migration hand-off](migration-to-pi-agent-rust.md)). The descriptions below apply only to the Node Pi host, not the Rust `pi` binary.
 
 Patch scripts read installed Pi package files, apply text transformations, and write the patched files back.
 
@@ -121,10 +124,11 @@ Target resolution uses the global npm root and `PI_CODING_AGENT_DIR` when provid
 
 Install/update and patching:
 
-- `PI_PACKAGE`
 - `PI_GLOBAL_NODE_MODULES`
 - `PI_CODING_AGENT_DIR`
 - `PI_TUI_DIST`
+
+The install/update scripts pass their environment through to the `pi_agent_rust` installer. `YES` and `NO_GUM` default to `1` (overridable); `VERSION` and `DEST`, if set, are also honored by the installer.
 
 Task/sub-agent runtime:
 
