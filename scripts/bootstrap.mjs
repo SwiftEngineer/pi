@@ -13,7 +13,7 @@
 //   --dry-run           print the plan without changing anything
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { configureWebAccess } from "./web-access-config.mjs";
@@ -36,11 +36,11 @@ function fail(message) {
 
 // Run a command, streaming its output. On Windows, `npm`/`pi` are .cmd shims,
 // so run through the shell there; on POSIX resolve the binary directly.
-function run(cmd, args) {
+function run(cmd, args, opts = {}) {
   console.log(`  $ ${cmd} ${args.join(" ")}`);
   if (DRY_RUN) return;
   try {
-    execFileSync(cmd, args, { stdio: "inherit", shell: isWin });
+    execFileSync(cmd, args, { stdio: "inherit", shell: isWin, ...opts });
   } catch {
     fail(`command failed: ${cmd} ${args.join(" ")}`);
   }
@@ -85,15 +85,38 @@ function main() {
     );
   }
 
-  // 2. Register every package in the distribution manifest.
+  // 2. A local-checkout harness (install.sh / install.ps1 set PI_HARNESS_SOURCE)
+  //    is registered in place: unlike git/npm sources, pi does not run npm for
+  //    it, so the checkout's own dependencies must exist when pi launches and
+  //    loads extensions/search.ts (glob, ignore) and ast-tools (node_modules/.bin/sg).
+  //    Skip when they're already present so repeat installs on a dev checkout
+  //    stay fast and never disturb an existing node_modules. Install scripts
+  //    stay enabled on purpose: @ast-grep/cli materializes node_modules/.bin/sg.
+  const harnessSource =
+    HARNESS_OVERRIDE && manifest.packages.some((pkg) => pkg.role === "harness")
+      ? HARNESS_OVERRIDE
+      : null;
+  if (harnessSource) {
+    const sg = isWin ? "sg.cmd" : "sg";
+    const haveDeps =
+      existsSync(path.join(harnessSource, "node_modules", "glob")) &&
+      existsSync(path.join(harnessSource, "node_modules", "ignore")) &&
+      existsSync(path.join(harnessSource, "node_modules", ".bin", sg));
+    if (!haveDeps) {
+      console.log(`\n→ Installing harness dependencies in ${harnessSource}`);
+      run("npm", ["install", "--omit=dev"], { cwd: harnessSource });
+    }
+  }
+
+  // 3. Register every package in the distribution manifest.
   for (const pkg of manifest.packages) {
     const source =
-      pkg.role === "harness" && HARNESS_OVERRIDE ? HARNESS_OVERRIDE : pkg.source;
+      pkg.role === "harness" && harnessSource ? harnessSource : pkg.source;
     console.log(`\n→ Installing ${pkg.name} — ${pkg.description}`);
     run("pi", ["install", source]);
   }
 
-  // 3. pi-web-access ships with an interactive curator that opens a browser on
+  // 4. pi-web-access ships with an interactive curator that opens a browser on
   //    every search. Force it headless so installs never take over the browser.
   if (manifest.packages.some((pkg) => pkg.name === "pi-web-access")) {
     console.log("");
