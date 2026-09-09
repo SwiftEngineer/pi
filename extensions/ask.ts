@@ -28,13 +28,14 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "ask",
     label: "Ask User",
-    description: "Ask structured clarification questions with selectable options. Use only when repo context/tools cannot answer and choices have material tradeoffs.",
+    description: "Ask structured clarification questions with selectable options. Use only when repo context/tools cannot answer and choices have material tradeoffs. Cancelling a question records no answer ('cancelled') rather than a default choice — re-ask or proceed without it.",
     promptSnippet: "ask — structured user clarification.",
     promptGuidelines: ["Default to action; use ask only when a missing choice materially changes the outcome."],
     parameters: AskParams,
     executionMode: "sequential",
     async execute(_toolCallId, params: AskParamsType, _signal, _onUpdate, ctx) {
       const answers: Record<string, string[]> = {};
+      const cancelled: string[] = [];
       const lines: string[] = [];
       for (const question of params.questions) {
         if (!ctx.hasUI || question.options.length === 0) {
@@ -48,20 +49,28 @@ export default function (pi: ExtensionAPI) {
             if (!selected || selected === "Done") break;
             picked.push(selected);
           }
-          answers[question.id] = picked.length > 0 ? picked : fallbackChoice(question);
+          if (picked.length > 0) answers[question.id] = picked;
+          else cancelled.push(question.id);
         } else {
-          const labels = question.options.map((option, index) => {
-            const suffix = index === question.recommended ? " (Recommended)" : "";
-            return `${option.label}${suffix}`;
-          });
+          // The recommendation is tracked by index: the "(Recommended)" suffix
+          // is display-only, and the selection is mapped back through the
+          // labels array — never stripped from the label text, which may
+          // legitimately end with "(Recommended)".
+          const labels = question.options.map((option, index) =>
+            index === question.recommended ? `${option.label} (Recommended)` : option.label,
+          );
           const selected = await ctx.ui.select(question.question, labels);
-          const normalized = selected?.replace(/ \(Recommended\)$/, "");
-          answers[question.id] = normalized ? [normalized] : fallbackChoice(question);
+          if (selected === undefined) {
+            cancelled.push(question.id); // Esc/cancel — record no answer instead of inventing one.
+          } else {
+            const index = labels.indexOf(selected);
+            answers[question.id] = [question.options[index]?.label ?? selected];
+          }
         }
-        const answer = answers[question.id] ?? [];
-        lines.push(`${question.id}: ${answer.join(", ") || "(no selection)"}`);
+        const answer = answers[question.id];
+        lines.push(`${question.id}: ${answer ? answer.join(", ") : "(cancelled — no answer)"}`);
       }
-      return { content: [{ type: "text", text: lines.join("\n") }], details: { answers } };
+      return { content: [{ type: "text", text: lines.join("\n") }], details: { answers, cancelled } };
     },
   });
 }

@@ -121,7 +121,11 @@ function estimateTokens(rawMessage: SessionContext["messages"][number]): number 
       break;
     }
     case "hookMessage":
+    case "custom":
     case "toolResult": {
+      // "custom" messages (e.g. delivered subagent results) reach the LLM as
+      // user messages via convertToLlm(), so their content must be estimated
+      // like any other context message; details are not sent to the LLM.
       const content = message.content;
       if (typeof content === "string") {
         fragments.push(content);

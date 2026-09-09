@@ -1,12 +1,17 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createJiti } from "jiti";
 
+// The subagents extension registers nothing when it detects a subagent child;
+// the smoke asserts its full registration, so force the parent role.
+delete process.env.SWIFT_PI_SUBAGENT;
 const root = path.resolve(import.meta.dirname, "..");
 const jiti = createJiti(import.meta.url, { interopDefault: true });
 const tools = new Map();
+const commands = new Map();
+const sentMessages = [];
 const handlers = [];
 
 function execCommand(command, args, options = {}) {
@@ -30,7 +35,9 @@ const pi = {
   getActiveTools() { return ["read", "bash", "edit", "write", ...tools.keys()]; },
   registerShortcut(keyId, options) { shortcuts.push({ keyId, options }); },
   registerMessageRenderer(customType, renderer) { messageRenderers.set(customType, renderer); },
-  sendMessage() {},
+  registerCommand(name, options) { commands.set(name, options); },
+  getAllTools() { return []; },
+  sendMessage(message) { sentMessages.push(message); },
   sendUserMessage() {},
   appendEntry() {},
   exec: execCommand,
@@ -45,6 +52,7 @@ for (const file of [
   "extensions/ast-tools.ts",
   "extensions/todo-write.ts",
   "extensions/ask.ts",
+  "extensions/context.ts",
   "extensions/subagents/index.ts",
 ]) {
   const mod = await jiti.import(path.join(root, file));
@@ -54,9 +62,12 @@ for (const file of [
 const ctx = { cwd: root, hasUI: false, ui: {} };
 
 // system-prompt: custom prompts must re-attach the tool promptGuidelines that
-// pi's buildSystemPrompt() drops on the customPrompt path (D11).
+// pi's buildSystemPrompt() drops on the customPrompt path (D11). Fixtures use
+// the shipped edit-anchor phrasing (hash anchors copied from the served read).
 {
   let systemPrompt = "base";
+  const anchorGuideline =
+    "Copy edit anchors (the 3-char hash before │) byte-for-byte from your latest read of the file";
   for (const { handler } of handlers.filter((handler) => handler.event === "before_agent_start")) {
     const result = await handler(
       {
@@ -66,10 +77,10 @@ const ctx = { cwd: root, hasUI: false, ui: {} };
         systemPromptOptions: {
           cwd: root,
           promptGuidelines: [
-            "Use edit for precise changes (edits[].oldText must match exactly)",
+            anchorGuideline,
             "",
-            "  Keep edits[].oldText as small as possible while still being unique.  ",
-            "Use edit for precise changes (edits[].oldText must match exactly)",
+            "  Keep each edit span as small as possible while still being unique.  ",
+            anchorGuideline,
           ],
         },
       },
@@ -79,11 +90,18 @@ const ctx = { cwd: root, hasUI: false, ui: {} };
   }
   if (!systemPrompt.includes("staff-level coding agent")) throw new Error("system-prompt smoke failed: compact prompt missing");
   if (!systemPrompt.includes("ls for directory listings")) throw new Error("system-prompt smoke failed: ls/find routing missing");
-  if (!systemPrompt.includes("oldText must match exactly")) throw new Error("system-prompt smoke failed: tool guidelines not restored");
-  if (systemPrompt.split("Keep edits[].oldText").length !== 2) throw new Error("system-prompt smoke failed: guidelines not deduplicated");
+  if (!systemPrompt.includes("3-char hash before │")) throw new Error("system-prompt smoke failed: tool guidelines not restored");
+  // Exactly two occurrences: once from the compact prompt itself, once from the
+  // restored guidelines (the duplicate fixture entry must be deduplicated).
+  if (systemPrompt.split(anchorGuideline).length !== 3) {
+    throw new Error("system-prompt smoke failed: guidelines not restored exactly once / not deduplicated");
+  }
+  if (systemPrompt.split("Keep each edit span as small as possible").length !== 2) {
+    throw new Error("system-prompt smoke failed: guidelines not trimmed/deduplicated");
+  }
 }
 
-// tool-policy: edit pre-flight guard.
+// tool-policy: bash command policy.
 {
   const emitToolCall = async (event) => {
     for (const { handler } of handlers.filter((handler) => handler.event === "tool_call")) {
@@ -94,84 +112,14 @@ const ctx = { cwd: root, hasUI: false, ui: {} };
   };
   const expectBlocked = (result, needle, label) => {
     if (!result?.block || !result.reason.includes(needle)) {
-      throw new Error(`edit guard smoke failed: ${label}`);
+      throw new Error(`tool-policy smoke failed: ${label}`);
     }
   };
-
-  const dir = mkdtempSync(path.join(tmpdir(), "smoke-edit-"));
-  try {
-    const file = path.join(dir, "RoomTest.elm");
-    writeFileSync(
-      file,
-      [
-        "suite =",
-        '    describe "rooms"',
-        '        [ test "it works"',
-        "        ]",
-        '    describe "rooms"',
-        '        [ test "it works"',
-        "        ]",
-        "describe “the room” do",
-        "  assert true  ",
-        "end — done",
-        "",
-      ].join("\n"),
-    );
-    const rel = path.relative(root, file);
-
-    // Exact + unique: allowed through (undefined).
-    if (
-      await emitToolCall({
-        type: "tool_call",
-        toolName: "edit",
-        input: { path: rel, edits: [{ oldText: "end — done", newText: "end - ok" }] },
-      })
-    ) {
-      throw new Error("edit guard smoke failed: exact unique edit blocked");
+  const expectAllowed = async (command, label) => {
+    if (await emitToolCall({ type: "tool_call", toolName: "bash", input: { command } })) {
+      throw new Error(`tool-policy smoke failed: blocked '${command}' — ${label}`);
     }
-
-    // Non-unique exact match: blocked with occurrence lines.
-    expectBlocked(
-      await emitToolCall({
-        type: "tool_call",
-        toolName: "edit",
-        input: { path: rel, edits: [{ oldText: '    describe "rooms"', newText: "ok" }] },
-      }),
-      "matches 2 locations",
-      "duplicate occurrences not reported",
-    );
-
-    // Fuzzy-only match (model dropped trailing spaces): blocked with exact bytes.
-    const fuzzy = await emitToolCall({
-      type: "tool_call",
-      toolName: "edit",
-      input: { path: rel, edits: [{ oldText: "assert true\nend", newText: "assert false\nend" }] },
-    });
-    expectBlocked(fuzzy, "normalization", "fuzzy-only match not blocked");
-    if (!fuzzy.reason.includes("··")) throw new Error("edit guard smoke failed: trailing spaces not visualized");
-
-    // No match at all (wrong indentation): blocked with candidates + hint.
-    const missing = await emitToolCall({
-      type: "tool_call",
-      toolName: "edit",
-      input: { path: rel, edits: [{ oldText: 'suite =\n  describe "rooms"', newText: "ok" }] },
-    });
-    expectBlocked(missing, "not fuzzy-matched", "indentation hint missing");
-    if (!missing.reason.includes('L2:     describe "rooms"')) throw new Error("edit guard smoke failed: candidate lines not shown");
-
-    // Unreadable file: never blocked (the tool reports it instead).
-    if (
-      await emitToolCall({
-        type: "tool_call",
-        toolName: "edit",
-        input: { path: path.join(dir, "missing.elm"), edits: [{ oldText: "x", newText: "y" }] },
-      })
-    ) {
-      throw new Error("edit guard smoke failed: missing file blocked");
-    }
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  };
 
   // bash policy regression checks: the message must name the live replacement tool.
   expectBlocked(
@@ -190,14 +138,53 @@ const ctx = { cwd: root, hasUI: false, ui: {} };
     "bash policy stopped blocking grep",
   );
 
+  // `bash -c` / `sh -c` payloads get the same screening as top-level commands.
+  expectBlocked(
+    await emitToolCall({ type: "tool_call", toolName: "bash", input: { command: 'bash -c "cat /etc/hosts"' } }),
+    "Use the read tool instead of shelling out to cat",
+    "bash -c payload bypassed command-position detection",
+  );
+  expectBlocked(
+    await emitToolCall({ type: "tool_call", toolName: "bash", input: { command: "sh -c 'ls'" } }),
+    "Use the ls tool instead of shelling out to ls",
+    "sh -c payload bypassed command-position detection",
+  );
+  expectBlocked(
+    await emitToolCall({ type: "tool_call", toolName: "bash", input: { command: 'sudo bash -c "grep -n TODO foo.txt"' } }),
+    "Use the search tool instead of shelling out to grep",
+    "wrapped bash -c payload bypassed command-position detection",
+  );
+  expectBlocked(
+    await emitToolCall({ type: "tool_call", toolName: "bash", input: { command: 'bash -lc "ls 2>/dev/null"' } }),
+    "Do not redirect stderr",
+    "bash -c payload bypassed stderr-redirect detection",
+  );
+  // ...but payloads that are legitimate pass through.
+  await expectAllowed('bash -c "make test"', "benign -c payload");
+
+  // stderr-redirect variants: 2>&1, 2>/dev/null, 2>>file, &>, &>>.
+  for (const command of ["make 2>&1", "make 2>/dev/null", "make 2>>build.log", "make &>build.log", "make &>>build.log"]) {
+    expectBlocked(
+      await emitToolCall({ type: "tool_call", toolName: "bash", input: { command } }),
+      "Do not redirect stderr",
+      `stderr-redirect variant missed in '${command}'`,
+    );
+  }
+
+  // awk/sed are legitimate when no dedicated tool replaces them ...
+  await expectAllowed("awk '{print $1}' foo.txt", "awk has no dedicated replacement");
+  await expectAllowed("sed 's/a/b/' foo.txt", "sed has no dedicated replacement");
+  // ...but the specific `sed -n` line-range read rule still applies.
+  expectBlocked(
+    await emitToolCall({ type: "tool_call", toolName: "bash", input: { command: "sed -n '1,10p' foo.txt" } }),
+    "Use read offsets/ranges",
+    "sed -n rule stopped blocking line-range reads",
+  );
+
   // Command-position matching: subcommand arguments must never trigger the
   // redirect (`aws s3 ls` regression).
   for (const command of ["aws s3 ls", "git ls-files", "npm ls", "git grep foo", "echo cat"]) {
-    if (
-      await emitToolCall({ type: "tool_call", toolName: "bash", input: { command } })
-    ) {
-      throw new Error(`bash policy blocked '${command}' — argument matched instead of command position`);
-    }
+    await expectAllowed(command, "argument matched instead of command position");
   }
   // ...but wrappers in front of a shell coreutil are still caught.
   for (const command of ["sudo cat /etc/hosts", "FOO=1 ls", "time ls", "xargs ls"]) {
@@ -210,7 +197,7 @@ const ctx = { cwd: root, hasUI: false, ui: {} };
   expectBlocked(
     await emitToolCall({ type: "tool_call", toolName: "bash", input: { command: "ls | head" } }),
     "head/tail",
-    "bash policy missed command-position coreutil in 'ls | head'",
+    "bash policy missed pipe-through-head in 'ls | head'",
   );
 
   // tool-policy must never point at a tool that is not registered: with no
@@ -235,7 +222,7 @@ const ctx = { cwd: root, hasUI: false, ui: {} };
       }
       return undefined;
     };
-    for (const command of ["ls", "cat foo.txt", "grep -n TODO foo.txt"]) {
+    for (const command of ["ls", "cat foo.txt", "grep -n TODO foo.txt", "awk '{print $1}' foo.txt"]) {
       if (await emitPolicyCall({ type: "tool_call", toolName: "bash", input: { command } })) {
         throw new Error(`tool-policy blocked '${command}' with no replacement tool registered`);
       }
@@ -301,9 +288,75 @@ const ctx = { cwd: root, hasUI: false, ui: {} };
   }
 }
 
+// context: custom-role messages (delivered subagent results) must count toward
+// the Messages category — they reach the LLM as user messages.
+{
+  const command = commands.get("context");
+  if (!command) throw new Error("context smoke failed: /context command not registered");
+  const customContent = "SMOKE_CUSTOM_PAYLOAD ".repeat(20);
+  const entries = [
+    {
+      type: "custom_message",
+      id: "e2",
+      parentId: "e1",
+      timestamp: new Date().toISOString(),
+      customType: "subagent_result",
+      content: customContent,
+      display: true,
+      details: { notCounted: true },
+    },
+  ];
+  const commandCtx = {
+    cwd: root,
+    mode: "print",
+    hasUI: false,
+    ui: { notify() {} },
+    model: { name: "Smoke Model", id: "smoke-model", contextWindow: 100_000 },
+    sessionManager: { getEntries: () => entries, getLeafId: () => "e2" },
+    getSystemPrompt: () => "base",
+    getSystemPromptOptions: () => ({}),
+  };
+  await command.handler("", commandCtx);
+  const breakdown = sentMessages.at(-1)?.details;
+  if (!breakdown) throw new Error("context smoke failed: no breakdown sent");
+  const messages = breakdown.categories.find((category) => category.id === "messages");
+  const expected = Math.ceil(customContent.length / 4);
+  if (!messages || messages.tokens !== expected) {
+    throw new Error(`context smoke failed: custom message tokens ${messages?.tokens} != ${expected}`);
+  }
+}
+
 const search = tools.get("search");
 const searchResult = await search.execute("smoke-search", { pattern: "AGENT_PROMPTS", paths: "extensions/subagents/agents.ts" }, undefined, undefined, ctx);
 if (!searchResult.content[0].text.includes("AGENT_PROMPTS")) throw new Error("search smoke failed");
+
+// search: nested .gitignore files between the search root and each file are
+// honored (each relative to its own directory), and an invalid regex returns a
+// friendly tool error instead of throwing a raw RegExp error.
+{
+  const dir = mkdtempSync(path.join(tmpdir(), "smoke-ignore-"));
+  try {
+    mkdirSync(path.join(dir, "pkg"), { recursive: true });
+    writeFileSync(path.join(dir, ".gitignore"), "root-skip.txt\n");
+    writeFileSync(path.join(dir, "pkg", ".gitignore"), "nested-skip.txt\n");
+    writeFileSync(path.join(dir, "root-skip.txt"), "NEEDLE_ROOT_SKIP\n");
+    writeFileSync(path.join(dir, "pkg", "nested-skip.txt"), "NEEDLE_NESTED_SKIP\n");
+    writeFileSync(path.join(dir, "pkg", "kept.txt"), "NEEDLE_KEPT\n");
+    const ignoreCtx = { cwd: dir, hasUI: false, ui: {} };
+    const ignored = await search.execute("smoke-ignore", { pattern: "NEEDLE_", paths: dir }, undefined, undefined, ignoreCtx);
+    const text = ignored.content[0].text;
+    if (!text.includes("pkg/kept.txt")) throw new Error("search smoke failed: unignored file missed");
+    if (text.includes("NEEDLE_ROOT_SKIP")) throw new Error("search smoke failed: root .gitignore not honored");
+    if (text.includes("NEEDLE_NESTED_SKIP")) throw new Error("search smoke failed: nested .gitignore not honored");
+
+    const bad = await search.execute("smoke-badregex", { pattern: "([unclosed" }, undefined, undefined, ctx);
+    if (!bad.content[0].text.includes("Invalid regular expression")) {
+      throw new Error("search smoke failed: invalid regex not caught");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 const ls = tools.get("ls");
 const lsResult = await ls.execute("smoke-ls", { path: "extensions" }, undefined, undefined, ctx);
@@ -317,13 +370,78 @@ const todo = tools.get("todo_write");
 const todoResult = await todo.execute("smoke-todo", { ops: [{ op: "init", list: [{ phase: "Smoke", items: ["Run smoke"] }] }, { op: "done", task: "Run smoke" }] }, undefined, undefined, ctx);
 if (!todoResult.content[0].text.includes("✓ Run smoke")) throw new Error("todo smoke failed");
 
+// todo-write: session_start must reset phase state so todos cannot leak across
+// session switches in a long-lived process.
+{
+  const sessionStart = handlers.filter((handler) => handler.event === "session_start");
+  if (sessionStart.length === 0) throw new Error("todo smoke failed: no session_start handler registered");
+  for (const { handler } of sessionStart) await handler({ type: "session_start", reason: "new" }, ctx);
+  const after = await todo.execute("smoke-todo-reset", { ops: [] }, undefined, undefined, ctx);
+  if (!after.content[0].text.includes("No todos.")) throw new Error("todo smoke failed: phases not reset on session start");
+}
+
 const ask = tools.get("ask");
 const askResult = await ask.execute("smoke-ask", { questions: [{ id: "choice", question: "Pick", options: [{ label: "A" }, { label: "B" }], recommended: 1 }] }, undefined, undefined, ctx);
 if (!askResult.content[0].text.includes("B")) throw new Error("ask smoke failed");
 
+// ask: in TUI mode, cancelling (Esc) must record no answer instead of the
+// recommended option, and labels that legitimately end with "(Recommended)"
+// must survive intact.
+{
+  const cancelCtx = { cwd: root, hasUI: true, ui: { async select() { return undefined; } } };
+  const cancelled = await ask.execute(
+    "smoke-ask-cancel",
+    { questions: [{ id: "pick", question: "Pick", options: [{ label: "A" }, { label: "B" }], recommended: 1 }] },
+    undefined,
+    undefined,
+    cancelCtx,
+  );
+  if (!cancelled.content[0].text.includes("(cancelled — no answer)")) throw new Error("ask smoke failed: cancel not reported");
+  if (cancelled.details.answers.pick !== undefined) throw new Error("ask smoke failed: cancel fabricated an answer");
+  if (!Array.isArray(cancelled.details.cancelled) || !cancelled.details.cancelled.includes("pick")) {
+    throw new Error("ask smoke failed: cancelled question not recorded");
+  }
+
+  const pickCtx = {
+    cwd: root,
+    hasUI: true,
+    ui: { async select(_title, options) { return options.find((option) => option.includes("(Recommended)")); } },
+  };
+  const picked = await ask.execute(
+    "smoke-ask-label",
+    { questions: [{ id: "pick", question: "Pick", options: [{ label: "Keep (Recommended)" }] }] },
+    undefined,
+    undefined,
+    pickCtx,
+  );
+  if (picked.details.answers.pick[0] !== "Keep (Recommended)") throw new Error("ask smoke failed: label corrupted by suffix stripping");
+}
+
 const ast = tools.get("ast_grep");
 const astResult = await ast.execute("smoke-ast", { pat: "AGENT_PROMPTS", paths: ["extensions/subagents/agents.ts"], lang: "ts" }, undefined, undefined, ctx);
 if (!astResult.content[0].text.includes("AGENT_PROMPTS")) throw new Error("ast_grep smoke failed");
+
+// zai-compat: must import cleanly and register the Z.ai schema-safe provider
+// override. extensions/zai-models.ts (a parallel workstream) may not exist yet;
+// retry once after a short wait before giving up.
+{
+  const zaiPath = path.join(root, "extensions/zai-compat.ts");
+  if (!existsSync(zaiPath)) throw new Error("zai-compat smoke failed: extensions/zai-compat.ts missing");
+  const loadZaiCompat = async () => {
+    try {
+      return await jiti.import(zaiPath);
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      return await jiti.import(zaiPath);
+    }
+  };
+  const zaiMod = await loadZaiCompat();
+  const providers = [];
+  zaiMod.default({ registerProvider(provider) { providers.push(provider); } });
+  if (providers.length !== 1) {
+    throw new Error(`zai-compat smoke failed: provider not registered (got ${providers.length})`);
+  }
+}
 
 for (const required of ["search", "ast_grep", "ast_edit", "todo_write", "ask", "subagents", "ls", "find"]) {
   if (!tools.has(required)) throw new Error(`missing tool: ${required}`);

@@ -22,7 +22,7 @@ This repo is **private**, so the one-liner installs over SSH. It works on any ma
 
 What it does, in order:
 
-1. Installs the pinned Pi coding agent globally (`@earendil-works/pi-coding-agent@0.84.3`), replacing any stale/faulty `pi` on your PATH.
+1. Installs the pinned Pi coding agent globally (`@earendil-works/pi-coding-agent@0.84.4`), replacing any stale/faulty `pi` on your PATH.
 2. Registers the harness and the plugins (`pi-mcp-adapter`, `pi-web-access`, `pi-powerline-footer`, `pi-better-edit`) via `pi install`.
 3. Configures `pi-web-access` to run headless: forces `"workflow": "none"` and `"autoOpenBrowser": false` in `~/.pi/web-search.json` (respecting `PI_CODING_AGENT_DIR` / `XDG_CONFIG_HOME`). Existing config keys are preserved, so re-running the installer never wipes your provider keys. Without this, every `web_search` opens an interactive curator page in your browser and waits for manual approval.
 

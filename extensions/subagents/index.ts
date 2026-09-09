@@ -326,19 +326,29 @@ function runChild(record: AgentRecord, cwd: string, onUpdate: () => void, signal
       if (signal?.aborted) abort();
       else signal?.addEventListener("abort", abort, { once: true });
 
-      const finish = (code: number) => {
+      // Node emits BOTH 'error' and 'close' on spawn failure (e.g. ENOENT), so
+      // finish must run exactly once.
+      let finished = false;
+      const finish = (code: number | null, signalName?: string) => {
+        if (finished) return;
+        finished = true;
         guard(() => {
           if (buffer.trim()) processLine(buffer);
           if (record.abortRequested) record.status = "aborted";
           else if (code === 0 && record.stopReason !== "error" && record.stopReason !== "aborted") record.status = "done";
-          else record.status = "failed";
+          else {
+            // External signal death arrives as close(null, signal); children we
+            // killed ourselves during abort are handled by the branch above.
+            record.status = "failed";
+            if (signalName) record.errorMessage = `killed by ${signalName}`;
+          }
         });
         signal?.removeEventListener("abort", abort);
         record.child = undefined;
         void cleanup().finally(resolve);
       };
 
-      child.on("close", (code) => finish(code ?? 0));
+      child.on("close", (code, signalName) => finish(code, signalName ?? undefined));
       child.on("error", (error) => {
         guard(() => {
           record.stderr += `${error.message}\n`;
@@ -365,12 +375,23 @@ function stillRunning(child: ChildProcess): boolean {
 function truncate(text: string): string {
   const bytes = Buffer.byteLength(text, "utf8");
   if (bytes <= OUTPUT_LIMIT) return text;
-  let end = OUTPUT_LIMIT;
-  while (end > 0 && Buffer.byteLength(text.slice(0, end), "utf8") > OUTPUT_LIMIT) end--;
-  const omitted = bytes - Buffer.byteLength(text.slice(0, end), "utf8");
-  return `${text.slice(0, end)}\n\n[Output truncated: ${omitted} bytes omitted.]`;
+  // Byte-aware walk over code points: accumulate UTF-8 width and stop before
+  // the first one that would exceed the budget. O(n) — the old per-code-unit
+  // Buffer.byteLength loop was O(n²).
+  let end = 0;
+  let kept = 0;
+  while (end < text.length) {
+    const code = text.charCodeAt(end);
+    const paired = code >= 0xd800 && code < 0xdc00 && text.charCodeAt(end + 1) >= 0xdc00;
+    // A surrogate pair is one 4-byte code point; an unpaired surrogate renders
+    // as U+FFFD (3 bytes).
+    const width = paired ? 4 : code < 0x80 ? 1 : code < 0x800 ? 2 : 3;
+    if (kept + width > OUTPUT_LIMIT) break;
+    kept += width;
+    end += paired ? 2 : 1;
+  }
+  return `${text.slice(0, end)}\n\n[Output truncated: ${bytes - kept} bytes omitted.]`;
 }
-
 function finalAssistantText(messages: Message[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
@@ -432,9 +453,11 @@ function appendCompletionEntry(pi: ExtensionAPI, record: AgentRecord): void {
 // ─── delivery (D3) ────────────────────────────────────────────────────────────
 //
 // Always deliverAs "followUp", unconditionally — no isIdle() branch. When idle
-// the option is ignored and triggerTurn starts a new turn; when busy it queues.
-// This is race-free (a busy send with no deliverAs throws internally and the
-// delivery is silently lost).
+// the option is ignored and triggerTurn starts a new turn; when busy the
+// message is queued. (The busy-send throw belongs to sendUserMessage/prompt,
+// which require an explicit deliverAs/streamingBehavior; sendMessage never
+// throws — when streaming without deliverAs it defaults to "steer", so passing
+// "followUp" here is a deliberate routing choice, not a throw guard.)
 
 function deliverResult(record: AgentRecord): void {
   const c = current;
@@ -569,6 +592,7 @@ class ReplayOverlay implements Component, Focusable {
   private scroll = 0;
   private cachedWidth = -1;
   private cachedBody: string[] = [];
+  private cachedMessagesKey = "";
 
   constructor(
     private readonly tui: TUI,
@@ -583,7 +607,11 @@ class ReplayOverlay implements Component, Focusable {
   }
 
   private buildBody(width: number): string[] {
-    if (width === this.cachedWidth) return this.cachedBody;
+    // The record mutates while the overlay is open (new transcript messages,
+    // status changes), so the cache key must cover those too — width alone
+    // would freeze the body until a resize.
+    const messagesKey = `${this.record.status}:${this.record.messages.length}`;
+    if (width === this.cachedWidth && messagesKey === this.cachedMessagesKey) return this.cachedBody;
     const th = this.theme;
     const rec = this.record;
     const container = new Container();
@@ -635,6 +663,7 @@ class ReplayOverlay implements Component, Focusable {
 
     this.cachedBody = container.render(width);
     this.cachedWidth = width;
+    this.cachedMessagesKey = messagesKey;
     return this.cachedBody;
   }
 
@@ -946,6 +975,9 @@ export default function (pi: ExtensionAPI) {
     parameters: SubagentParams,
     executionMode: "parallel",
     async execute(_toolCallId, params: SubagentParamsType, signal, _onUpdate, ctx) {
+      if (!Object.hasOwn(AGENT_PROMPTS, params.agent)) {
+        throw new Error(`Unknown subagent "${params.agent}". Valid agents: ${Object.keys(AGENT_PROMPTS).join(", ")}.`);
+      }
       if (params.tasks.length === 0) {
         return { content: [{ type: "text", text: "No tasks supplied." }], details: { results: [] } };
       }
@@ -974,11 +1006,11 @@ export default function (pi: ExtensionAPI) {
         finalize(record, { deliver: false });
         guard(repaintIndicator);
       });
-      const failed = records.some(isFailed);
+      // No terminate on failure: it would end the agent loop, so the model
+      // could never read the per-task results and retry.
       return {
         content: [{ type: "text", text: renderBlocking(records) }],
         details: { results: records.map((r) => ({ id: r.id, type: r.type, task: r.task, status: r.status })) },
-        terminate: failed,
       };
     },
   });

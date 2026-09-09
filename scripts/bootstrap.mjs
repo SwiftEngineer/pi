@@ -128,7 +128,7 @@ function main() {
   console.log("  • Set a provider API key (e.g. export ANTHROPIC_API_KEY=... or GEMINI_API_KEY=...).");
   console.log("  • Start the agent:            pi");
   console.log("  • Configure MCP servers:      pi   →  /mcp setup");
-  console.log("  • Update everything later:    pi update --all\n");
+  console.log("  • Update extensions later:    pi update --extensions\n");
 }
 
 main();

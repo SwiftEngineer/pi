@@ -1,0 +1,242 @@
+// Vendored Z.ai model catalog, flattened.
+//
+// Source: @earendil-works/pi-ai 0.84.4 — this is `Object.values(ZAI_MODELS)`
+// from `providers/zai` (i.e. `flattenModelCatalog("zai", data/zai.json)`),
+// serialized verbatim. pi's extension loader only aliases the pi-ai root
+// entrypoint, so `providers/zai` (and the `zai.models`/`model-catalog` modules
+// behind it) cannot be imported by extensions; the data lives here instead.
+//
+// Do NOT edit by hand. On a pi-ai version bump, regenerate with a one-liner
+// from the repo root (node_modules holds a full dev install):
+//
+//   node --input-type=module -e \
+//     "import { ZAI_MODELS } from './node_modules/@earendil-works/pi-ai/dist/providers/zai.models.js'; \
+//      console.log(JSON.stringify(Object.values(ZAI_MODELS), null, 1))"
+//
+// then paste the array below (keep `Object.values(...)` — vendor the flattened
+// output, never the flattenModelCatalog logic).
+
+import type { Model } from "@earendil-works/pi-ai";
+
+export const ZAI_MODELS: Model<"openai-completions">[] = [
+  {
+    id: "glm-4.7",
+    name: "GLM-4.7",
+    api: "openai-completions",
+    provider: "zai",
+    baseUrl: "https://api.z.ai/api/coding/paas/v4",
+    reasoning: true,
+    input: ["text"],
+    cost: {
+      input: 0.6,
+      output: 2.2,
+      cacheRead: 0.11,
+      cacheWrite: 0,
+    },
+    compat: {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      maxTokensField: "max_tokens",
+      thinkingFormat: "zai",
+      zaiToolStream: true,
+    },
+    contextWindow: 204800,
+    maxTokens: 131072,
+  },
+  {
+    id: "glm-5-turbo",
+    name: "GLM-5-Turbo",
+    api: "openai-completions",
+    provider: "zai",
+    baseUrl: "https://api.z.ai/api/coding/paas/v4",
+    reasoning: true,
+    input: ["text"],
+    cost: {
+      input: 1.2,
+      output: 4,
+      cacheRead: 0.24,
+      cacheWrite: 0,
+    },
+    compat: {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      maxTokensField: "max_tokens",
+      thinkingFormat: "zai",
+      zaiToolStream: true,
+    },
+    contextWindow: 200000,
+    maxTokens: 131072,
+  },
+  {
+    id: "glm-5.2",
+    name: "GLM-5.2",
+    api: "openai-completions",
+    provider: "zai",
+    baseUrl: "https://api.z.ai/api/coding/paas/v4",
+    reasoning: true,
+    thinkingLevelMap: {
+      off: "none",
+      minimal: null,
+      low: null,
+      medium: null,
+      high: "high",
+      xhigh: null,
+      max: "max",
+    },
+    input: ["text"],
+    cost: {
+      input: 1.4,
+      output: 4.4,
+      cacheRead: 0.26,
+      cacheWrite: 0,
+    },
+    compat: {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: true,
+      maxTokensField: "max_tokens",
+      thinkingFormat: "zai",
+      zaiToolStream: true,
+    },
+    contextWindow: 1000000,
+    maxTokens: 131072,
+  },
+  {
+    id: "glm-5.2-highspeed",
+    name: "GLM-5.2 Highspeed",
+    api: "openai-completions",
+    provider: "zai",
+    baseUrl: "https://api.z.ai/api/coding/paas/v4",
+    reasoning: true,
+    thinkingLevelMap: {
+      off: "none",
+      minimal: null,
+      low: null,
+      medium: null,
+      high: "high",
+      xhigh: null,
+      max: "max",
+    },
+    input: ["text"],
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    },
+    compat: {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: true,
+      maxTokensField: "max_tokens",
+      thinkingFormat: "zai",
+      zaiToolStream: true,
+    },
+    contextWindow: 1000000,
+    maxTokens: 131072,
+  },
+  {
+    id: "glm-5.3",
+    name: "GLM-5.3",
+    api: "openai-completions",
+    provider: "zai",
+    baseUrl: "https://api.z.ai/api/coding/paas/v4",
+    reasoning: true,
+    thinkingLevelMap: {
+      off: null,
+      minimal: null,
+      low: "low",
+      medium: null,
+      high: "high",
+      xhigh: null,
+      max: "max",
+    },
+    input: ["text"],
+    cost: {
+      input: 1.4,
+      output: 4.4,
+      cacheRead: 0.26,
+      cacheWrite: 0,
+    },
+    compat: {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: true,
+      maxTokensField: "max_tokens",
+      thinkingFormat: "zai",
+      zaiToolStream: true,
+    },
+    contextWindow: 1000000,
+    maxTokens: 131072,
+  },
+  {
+    id: "glm-5.3-flash",
+    name: "GLM-5.3-Flash",
+    api: "openai-completions",
+    provider: "zai",
+    baseUrl: "https://api.z.ai/api/coding/paas/v4",
+    reasoning: true,
+    thinkingLevelMap: {
+      off: null,
+      minimal: null,
+      low: "low",
+      medium: null,
+      high: "high",
+      xhigh: null,
+      max: "max",
+    },
+    input: ["text", "image"],
+    cost: {
+      input: 0.075,
+      output: 0.25,
+      cacheRead: 0.015,
+      cacheWrite: 0,
+    },
+    compat: {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: true,
+      maxTokensField: "max_tokens",
+      thinkingFormat: "zai",
+      zaiToolStream: true,
+    },
+    contextWindow: 1000000,
+    maxTokens: 131072,
+  },
+  {
+    id: "glm-5.3-highspeed",
+    name: "GLM-5.3 Highspeed",
+    api: "openai-completions",
+    provider: "zai",
+    baseUrl: "https://api.z.ai/api/coding/paas/v4",
+    reasoning: true,
+    thinkingLevelMap: {
+      off: null,
+      minimal: null,
+      low: "low",
+      medium: null,
+      high: "high",
+      xhigh: null,
+      max: "max",
+    },
+    input: ["text"],
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    },
+    compat: {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: true,
+      maxTokensField: "max_tokens",
+      thinkingFormat: "zai",
+      zaiToolStream: true,
+    },
+    contextWindow: 1000000,
+    maxTokens: 131072,
+  },
+];

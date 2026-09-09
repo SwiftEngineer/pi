@@ -92,7 +92,7 @@ export default function (pi: ExtensionAPI) {
         const result = await pi.exec(sgPath, args, execOptions(ctx.cwd, signal));
         outputs.push(result.stdout.trim() || result.stderr.trim() || `rewrite exited ${result.code}`);
         if (result.code !== 0) {
-          return { content: [{ type: "text", text: outputs.join("\n\n") }], details: { code: result.code }, terminate: true };
+          return { content: [{ type: "text", text: outputs.join("\n\n") }], details: { code: result.code } };
         }
       }
       return { content: [{ type: "text", text: outputs.join("\n\n") || "No rewrites reported." }], details: { code: 0 } };

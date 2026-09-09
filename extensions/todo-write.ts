@@ -72,6 +72,13 @@ function render(): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  // Todos are per-session scratch state; reset on every session start/reload so
+  // they cannot leak across session switches in a long-lived process (mirrors
+  // how extensions/subagents/index.ts rebinds on session_start).
+  pi.on("session_start", () => {
+    state.phases = [];
+  });
+
   pi.registerTool({
     name: "todo_write",
     label: "Todo Write",

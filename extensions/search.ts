@@ -49,6 +49,8 @@ async function expandInput(cwd: string, input: string): Promise<string[]> {
   return glob(input, { cwd, nodir: true, dot: true, absolute: true });
 }
 
+type IgnoreMatcher = ReturnType<typeof ignore>;
+
 async function loadIgnore(cwd: string, enabled: boolean) {
   const ig = ignore();
   if (!enabled) return ig;
@@ -58,6 +60,42 @@ async function loadIgnore(cwd: string, enabled: boolean) {
   return ig;
 }
 
+// Per-directory .gitignore rules from nested directories, applied relative to
+// their own directory (git semantics). Memoized per search run.
+async function dirIgnore(dir: string, cache: Map<string, IgnoreMatcher | undefined>): Promise<IgnoreMatcher | undefined> {
+  const cached = cache.get(dir);
+  if (cached !== undefined || cache.has(dir)) return cached;
+  const file = path.join(dir, ".gitignore");
+  let ig: IgnoreMatcher | undefined;
+  if (await exists(file)) {
+    ig = ignore();
+    ig.add(await fs.readFile(file, "utf8"));
+  }
+  cache.set(dir, ig);
+  return ig;
+}
+
+// Root ignore first (base case, plus harness defaults), then every .gitignore
+// along the directory chain from the search root down to the file's directory.
+async function isIgnored(
+  file: string,
+  root: string,
+  rootIg: IgnoreMatcher,
+  cache: Map<string, IgnoreMatcher | undefined>,
+): Promise<boolean> {
+  const rel = path.relative(root, file);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return false; // outside the search root: never ignored
+  if (rootIg.ignores(rel)) return true;
+  let dir = path.dirname(file);
+  while (dir.length > root.length && dir.startsWith(root)) {
+    const nested = await dirIgnore(dir, cache);
+    if (nested?.ignores(path.relative(dir, file))) return true;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return false;
+}
 function lineRanges(line: number, total: number, context: number): number[] {
   const start = Math.max(1, line - context);
   const end = Math.min(total, line + context);
@@ -77,15 +115,24 @@ export default function (pi: ExtensionAPI) {
     executionMode: "parallel",
     async execute(_toolCallId, params: SearchParamsType, _signal, _onUpdate, ctx) {
       const inputs = Array.isArray(params.paths) ? params.paths : [params.paths ?? "."];
-      const regex = new RegExp(params.pattern, params.i ? "i" : "");
+      let regex: RegExp;
+      try {
+        regex = new RegExp(params.pattern, params.i ? "i" : "");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: `Invalid regular expression /${params.pattern}/: ${message}` }],
+          details: { matches: 0, files: 0, invalidPattern: true },
+        };
+      }
       const maxResults = Math.max(1, Math.min(params.maxResults ?? 200, 1000));
       const context = Math.max(0, Math.min(params.context ?? 1, 10));
       const ig = await loadIgnore(ctx.cwd, params.gitignore !== false);
+      const nestedIgnores = new Map<string, IgnoreMatcher | undefined>();
       const files = new Set<string>();
       for (const input of inputs) {
         for (const file of await expandInput(ctx.cwd, input)) {
-          const rel = path.relative(ctx.cwd, file);
-          if (!rel.startsWith("..") && !path.isAbsolute(rel) && ig.ignores(rel)) continue;
+          if (await isIgnored(file, ctx.cwd, ig, nestedIgnores)) continue;
           files.add(file);
         }
       }

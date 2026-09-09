@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # pi package spec is supplied by run.sh from distribution.json (single source of
 # truth). The global install follows the official recipe: --ignore-scripts.
-ARG PI_PKG=@earendil-works/pi-coding-agent@0.84.3
+ARG PI_PKG=@earendil-works/pi-coding-agent@0.84.4
 RUN npm install -g --ignore-scripts ${PI_PKG}
 
 WORKDIR /repo

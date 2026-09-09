@@ -19,23 +19,37 @@
 //
 // Everything else passes through untouched. This extension overrides the
 // built-in `zai` provider with one whose transport applies the rewrite to
-// outbound tool schemas; model catalog and auth are reused from pi-ai's own
-// `zaiProvider`, so they stay in sync across pi updates. It is a no-op for
-// schemas without tuples or nullable unions. Remove once pi-better-edit ships
-// a Z.ai-safe schema (or Z.ai accepts standard applicators) and this stops
-// earning its keep.
+// outbound tool schemas. It is a no-op for schemas without tuples or nullable
+// unions. Remove once pi-better-edit ships a Z.ai-safe schema (or Z.ai accepts
+// standard applicators) and this stops earning its keep.
 //
-// Version coupling: the model catalog and auth come from the pi-ai this file
-// imports, i.e. the harness's own node_modules — not the global pi's copy. The
-// @earendil-works/* devDependencies must therefore stay in lockstep with the
-// distribution's pinned pi, or the zai model list regresses behind the built-in
-// provider (this actually happened: the override briefly hid glm-5.3-flash
-// when the checkout still bundled pi-ai 0.84.3 while pi ran 0.84.4).
+// Loader constraints: pi's extension loader resolves only aliased bare
+// specifiers for extensions (the pi-ai root + compat entrypoints,
+// pi-coding-agent, pi-agent-core, pi-tui, typebox), and standard installs
+// (`npm install --omit=dev`) ship no @earendil-works/* in node_modules at all —
+// deep subpaths like `@earendil-works/pi-ai/api/openai-completions.lazy`
+// (used here previously) or `.../providers/zai` fail with MODULE_NOT_FOUND
+// outside a dev checkout. Everything is therefore imported from the aliased
+// `@earendil-works/pi-ai/compat` entrypoint: at runtime the loader maps the
+// pi-ai root to that same compat bundle, and compat's type surface is a strict
+// superset of the core entrypoint's (the core types omit
+// `openAICompletionsApi`, so importing it from the root would not type-check).
+// The model catalog is vendored verbatim in ./zai-models.ts; regenerate that
+// file on pi-ai version bumps so the model list stays in lockstep with the
+// built-in provider (this actually mattered: the override briefly hid
+// glm-5.3-flash when the checkout still bundled pi-ai 0.84.3 while pi ran
+// 0.84.4).
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createProvider, type Context, type ProviderStreams, type Tool } from "@earendil-works/pi-ai";
-import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
-import { zaiProvider } from "@earendil-works/pi-ai/providers/zai";
+import {
+  createProvider,
+  envApiKeyAuth,
+  openAICompletionsApi,
+  type Context,
+  type ProviderStreams,
+  type Tool,
+} from "@earendil-works/pi-ai/compat";
+import { ZAI_MODELS } from "./zai-models.ts";
 
 type SchemaNode = Record<string, unknown>;
 
@@ -118,7 +132,6 @@ function zaiSafeContext(context: Context): Context {
 }
 
 export default function (pi: ExtensionAPI) {
-  const base = zaiProvider();
   const inner: ProviderStreams = openAICompletionsApi();
 
   const safeApi: ProviderStreams = {
@@ -126,13 +139,16 @@ export default function (pi: ExtensionAPI) {
     streamSimple: (model, context, options) => inner.streamSimple(model, zaiSafeContext(context), options),
   };
 
+  // Replicates pi-ai's zaiProvider() (dist/providers/zai.ts) field-for-field,
+  // with `api` swapped for the schema-rewriting transport above and the model
+  // catalog vendored in ./zai-models.ts (not importable through the loader
+  // aliases). Keep both in sync with that factory on pi-ai bumps.
   const provider = createProvider({
-    id: base.id,
-    name: base.name,
-    ...(base.baseUrl !== undefined && { baseUrl: base.baseUrl }),
-    ...(base.headers !== undefined && { headers: base.headers }),
-    auth: base.auth,
-    models: base.getModels(),
+    id: "zai",
+    name: "Z.AI",
+    baseUrl: "https://api.z.ai/api/coding/paas/v4",
+    auth: { apiKey: envApiKeyAuth("Z.AI API key", ["ZAI_API_KEY"]) },
+    models: ZAI_MODELS,
     api: safeApi,
   });
   pi.registerProvider(provider);

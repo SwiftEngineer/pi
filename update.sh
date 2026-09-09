@@ -13,6 +13,6 @@ fi
 # pull the latest for every remote-installed package (plugins).
 export PI_HARNESS_SOURCE="${PI_HARNESS_SOURCE:-$ROOT}"
 node "$ROOT/scripts/bootstrap.mjs"
-pi update --all || true
+pi update --extensions || true
 
 echo "SwiftEngineer Pi Distribution updated. Run it with: pi"

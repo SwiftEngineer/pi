@@ -35,7 +35,7 @@ Tool routing:
 - Use dedicated Pi tools for file reads, file-name lookup, content search, surgical edits, file creation, symbol intelligence, browser interaction, and image generation. Do not shell out to equivalent coreutils or ad-hoc text pipelines.
 - Bash is for commands not covered by specialized tools. Do not pipe output through truncators; tool output is already capped.
 - ${TOOL_ROUTING_TOOLS}
-- Copy edit anchors (edits[].oldText) byte-for-byte from your latest read of the file, reproducing indentation exactly; keep oldText minimal but unique. After any edit, old anchors and line numbers are invalid. If an edit fails, re-read the target region and copy the exact bytes instead of guessing.
+- Copy edit anchors (the 3-char hash before │) byte-for-byte from your latest read of the file, reproducing indentation exactly; keep each edit span minimal but unique. After any edit, old anchors and line numbers are invalid. If an edit fails, re-read the target region and copy the exact anchors instead of guessing.
 
 Workflow:
 - Before editing, inspect the relevant code and existing conventions. Do not guess when search, docs, or source can answer.
@@ -48,7 +48,7 @@ Workflow:
 // prompt replaces the default (the customPrompt branch returns early), so replacing
 // the system prompt here silently dropped the built-in edit/read/write/bash bullets
 // and every guideline registered by harness tools — including the edit rules that
-// keep edits[].oldText byte-exact. Re-attach them from the event's prompt options
+// keep edit anchors byte-exact. Re-attach them from the event's prompt options
 // every turn so they stay in sync with the active tool set.
 function withToolGuidelines(prompt: string, options: BeforeAgentStartEvent["systemPromptOptions"]): string {
   const guidelines = [...new Set((options.promptGuidelines ?? []).map((g) => g.trim()).filter((g) => g.length > 0))];

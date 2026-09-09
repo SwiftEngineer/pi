@@ -489,6 +489,12 @@ async function main() {
   for (const tc of toolCalls) byName[tc.name] = (byName[tc.name] || 0) + 1;
   console.log(`\n✔ Wrote ${outFile}`);
   console.log(`  turns (responses):   ${turns}`);
+  if (userTexts.length > 1) {
+    console.warn(
+      `  ⚠ ${userTexts.length} user messages were collapsed into a single fixture turn;` +
+        " replayed conversation structure will differ from the recording",
+    );
+  }
   console.log(`  user inputs:         ${fixture.userInputs.length}`);
   console.log(
     `  tool calls:          ${toolCalls.length} (${

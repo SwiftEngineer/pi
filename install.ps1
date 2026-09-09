@@ -12,3 +12,8 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 # Running from a checkout means "install this copy" as the harness.
 if (-not $env:PI_HARNESS_SOURCE) { $env:PI_HARNESS_SOURCE = $Root }
 node "$Root/scripts/bootstrap.mjs" @args
+if ($LASTEXITCODE -ne 0) {
+    # Windows PowerShell 5.1: $ErrorActionPreference='Stop' does not stop on
+    # native nonzero exits, so propagate the failure explicitly.
+    exit $LASTEXITCODE
+}
