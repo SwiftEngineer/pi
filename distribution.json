@@ -1,7 +1,7 @@
 {
   "name": "SwiftEngineer Pi Distribution",
   "description": "A custom distribution of the Pi coding agent: the SwiftEngineer default harness plus the token-efficient MCP adapter.",
-  "pi": "@earendil-works/pi-coding-agent@0.84.3",
+  "pi": "@earendil-works/pi-coding-agent@0.84.4",
   "packages": [
     {
       "name": "@swiftengineer/pi-harness",

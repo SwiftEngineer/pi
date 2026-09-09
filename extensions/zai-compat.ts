@@ -24,6 +24,13 @@
 // schemas without tuples or nullable unions. Remove once pi-better-edit ships
 // a Z.ai-safe schema (or Z.ai accepts standard applicators) and this stops
 // earning its keep.
+//
+// Version coupling: the model catalog and auth come from the pi-ai this file
+// imports, i.e. the harness's own node_modules — not the global pi's copy. The
+// @earendil-works/* devDependencies must therefore stay in lockstep with the
+// distribution's pinned pi, or the zai model list regresses behind the built-in
+// provider (this actually happened: the override briefly hid glm-5.3-flash
+// when the checkout still bundled pi-ai 0.84.3 while pi ran 0.84.4).
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createProvider, type Context, type ProviderStreams, type Tool } from "@earendil-works/pi-ai";
