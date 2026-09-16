@@ -20,8 +20,15 @@
  * SWIFT_PI_SUBAGENT=1, and when that variable is set this extension registers
  * nothing at all.
  *
- * Design decisions D1–D11 in openspec/changes/background-subagents/design.md are
- * binding; inline references point at the relevant one.
+ * Re-engagement (addressable-subagents, D1–D11 in
+ * openspec/changes/addressable-subagents/design.md): every agent runs on a
+ * durable session (`--session-id <record id>` in a private session dir), so
+ * `subagents_send` can resume a finished/failed/aborted agent with full prior
+ * context or kill-and-redirect an in-flight one. Delivered headers carry the
+ * agent id (D5); records are turn-shaped with per-engagement completion
+ * entries (D4); single-writer is enforced, not asserted (D9). Design decisions
+ * D1–D11 in openspec/changes/background-subagents/design.md remain binding
+ * where not superseded; inline references point at the relevant one.
  *
  * Hotkeys (chosen to avoid collisions with pi's built-in keybindings — alt+,
  * alt+. alt+o alt+x are all unbound by the default TUI):
@@ -66,9 +73,13 @@ const WIDGET_KEY = "subagents-indicator";
 const RESULT_TYPE = "subagent_result";
 const DISPATCH_ENTRY = "subagent_dispatch";
 const COMPLETION_ENTRY = "subagent_completion";
+const ENGAGEMENT_ENTRY = "subagent_engagement";
 const SIGKILL_ESCALATION_MS = 5_000;
 const SHUTDOWN_GRACE_MS = 300;
-
+const SESSION_DIR = path.join(os.tmpdir(), "swift-pi-subagent-sessions");
+// Pi session files are named `<timestamp>_<sessionId>.jsonl`; the resume
+// existence check (D8) must therefore scan for the suffix, not probe a path.
+const SESSION_FILE_SUFFIX = ".jsonl";
 // ─── types ──────────────────────────────────────────────────────────────────
 
 interface UsageStats {
@@ -101,6 +112,16 @@ interface AgentRecord {
   finalized: boolean;
   abortRequested: boolean;
   child: ChildProcess | undefined;
+  /** Child process id, from the live spawn or the persisted entries. */
+  pid: number | undefined;
+  /** True when this record was rebuilt from session entries, not spawned this session. */
+  restored: boolean;
+  /** Send-initiated kill in progress: the killed engagement must not deliver (D11). */
+  suppressNextDelivery: boolean;
+  /** A resume child reported it created a fresh session (D2/D8 hard failure). */
+  resumeSessionMissing: boolean;
+  /** Promise of the engagement currently in flight, if any. */
+  run: Promise<void> | undefined;
 }
 
 interface DispatchData {
@@ -109,6 +130,10 @@ interface DispatchData {
   task: string;
   assignment: string;
   spawnedAt: number;
+  /** Model requested at dispatch time, when any (normalized "provider/model-id"). */
+  model?: string | undefined;
+  /** Child process pid at spawn, for the cross-restart orphan probe (D9). */
+  pid: number | undefined;
 }
 
 interface CompletionData {
@@ -121,6 +146,22 @@ interface CompletionData {
   errorMessage: string | undefined;
   stderr: string;
   lost: boolean;
+  pid: number | undefined;
+  /** Set when this engagement failed because the durable session was missing (D8). */
+  resumeSessionMissing?: true;
+}
+
+/**
+ * Persisted per resume spawn (D9c): carries the resume child's pid so a parent
+ * crash mid-re-engagement still leaves the orphan visible to the cross-restart
+ * pid probe — completion entries alone only cover *completed* engagements.
+ */
+interface EngagementData {
+  id: string;
+  /** The engagement's prompt (the send message). */
+  message: string;
+  pid: number | undefined;
+  at: number;
 }
 
 interface ResultDetails {
@@ -143,10 +184,21 @@ let current: { ctx: ExtensionContext; pi: ExtensionAPI } | undefined;
 /** Insertion-ordered registry of every dispatched agent this session. */
 const registry = new Map<string, AgentRecord>();
 
+/**
+ * True between session_shutdown entry and the next session_start. A send's
+ * claimed-but-unspawned engagement at shutdown must not spawn an orphan child
+ * after the shutdown handler has already finalized and torn down (review
+ * finding 4) — runChild's pre-spawn abort check consults this via the
+ * shutdown handler setting abortRequested, and this flag covers the race
+ * where the flag was set after the record was already claimed.
+ */
+let shuttingDown = false;
+
+/** Verification hook for the headless harness (scripts/subagents-harness.mjs). */
+export const __registry = registry;
 /** Selector: 0 = parent, 1..n = agents in registry insertion order. */
 let selectedIndex = 0;
 let idCounter = 0;
-
 // ─── guarded background dispatcher (D7) ───────────────────────────────────────
 //
 // Every child-stdout / completion / timeout / repaint callback runs through
@@ -206,15 +258,26 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Child-runner core (shared by dispatch and blocking paths). Spawns one child
- * pi, streams its `--mode json` events, and mutates `record` live:
- *   - message_start (assistant)  → status "thinking" (D: use start events)
+ * Child-runner core (shared by dispatch, send, and blocking paths). Spawns one
+ * child pi, streams its `--mode json` events, and mutates `record` live:
+ *   - message_start (assistant)  → status "thinking"
  *   - tool_execution_start       → status "working"
  *   - message_end (assistant)    → capture message + usage/model/stopReason
  *   - message_end (toolResult)   → capture tool result for replay
- * Resolves when the child closes, having set a terminal status. Never rejects.
+ * The child runs on a durable session (D2): `--session-id <record id>` in a
+ * private session dir — create on first dispatch, resume on later engagements.
+ * Resume spawns omit `--model` (D10) and treat the "creating a new session"
+ * stderr warning as a hard failure (D8). Calls `opts.onSpawned(pid)` right
+ * after a successful spawn. Resolves when the child closes, having set a
+ * terminal status. Never rejects.
  */
-function runChild(record: AgentRecord, cwd: string, onUpdate: () => void, signal: AbortSignal | undefined): Promise<void> {
+function runChild(
+  record: AgentRecord,
+  cwd: string,
+  onUpdate: () => void,
+  signal: AbortSignal | undefined,
+  opts: { resume: boolean; message?: string | undefined; onSpawned?: (pid: number) => void },
+): Promise<void> {
   return new Promise<void>((resolve) => {
     void (async () => {
       const config = AGENT_PROMPTS[record.type] ?? AGENT_PROMPTS.task;
@@ -229,7 +292,48 @@ function runChild(record: AgentRecord, cwd: string, onUpdate: () => void, signal
         return;
       }
 
-      const args = ["--mode", "json", "-p", "--no-session", "--append-system-prompt", temp.file, record.assignment];
+      // D2: the child runs on a durable session keyed by the record id. Create
+      // the dir eagerly so the D8 existence scan has something to scan.
+      await fsp.mkdir(SESSION_DIR, { recursive: true }).catch(() => {});
+      // An abort that landed while staging (operator hotkey on a claimed-but-
+      // unspawned engagement, a send interrupt, or session shutdown) must not
+      // spawn a child nobody is waiting to kill — the pending engagement ends
+      // here, and the trailing finalize applies D11 suppression as usual.
+      if (record.abortRequested) {
+        record.status = "aborted";
+        void fsp.rm(temp.dir, { recursive: true, force: true }).catch(() => {});
+        resolve();
+        return;
+      }
+      const args = [
+        "--mode",
+        "json",
+        "-p",
+        "--session-dir",
+        SESSION_DIR,
+        "--session-id",
+        record.id,
+        "--append-system-prompt",
+        temp.file,
+      ];
+      // D10: the dispatch-time model request (validated "provider/model-id")
+      // applies on the first engagement only; resume children omit --model so
+      // the session's stored model carries forward.
+      if (!opts.resume && record.model) args.push("--model", record.model);
+      // The engagement's prompt is captured by the caller before its first
+      // await; a late read of record.assignment here would race a concurrent
+      // beginEngagement overwriting it (review finding 1).
+      args.push(opts.message ?? record.assignment);
+      // D9 regression tripwire: a record must never gain a second live child.
+      // Enforcement is D9 (sequential mode + synchronous claim + pid probe);
+      // this only catches a future refactor that breaks the invariant.
+      if (record.child !== undefined) {
+        record.status = "failed";
+        record.errorMessage = "internal: second live child attempted for one record";
+        void fsp.rm(temp.dir, { recursive: true, force: true }).catch(() => {});
+        resolve();
+        return;
+      }
       const invocation = piInvocation(args);
       const child = spawn(invocation.command, invocation.args, {
         cwd,
@@ -238,7 +342,10 @@ function runChild(record: AgentRecord, cwd: string, onUpdate: () => void, signal
         env: { ...process.env, SWIFT_PI_SUBAGENT: "1" },
       });
       record.child = child;
-
+      if (child.pid !== undefined) {
+        record.pid = child.pid;
+        opts.onSpawned?.(child.pid);
+      }
       let buffer = "";
       const setStatus = (status: AgentStatus) => {
         if (isTerminalStatus(record.status)) return;
@@ -342,6 +449,15 @@ function runChild(record: AgentRecord, cwd: string, onUpdate: () => void, signal
             record.status = "failed";
             if (signalName) record.errorMessage = `killed by ${signalName}`;
           }
+          // D2/D8: on a resume engagement this stderr warning fires only when
+          // the durable session was missing, so the child answered from a blank
+          // context. That result must not pass as a normal continuation.
+          if (opts.resume && !record.abortRequested && record.stderr.includes("creating a new session with that id")) {
+            record.status = "failed";
+            record.resumeSessionMissing = true;
+            record.errorMessage =
+              "Durable session missing: the resume child created a new blank session, so prior subagent context was absent. Re-dispatch instead of re-engaging.";
+          }
         });
         signal?.removeEventListener("abort", abort);
         record.child = undefined;
@@ -419,7 +535,9 @@ function resultBody(record: AgentRecord): string {
 }
 
 function resultHeaderText(record: AgentRecord): string {
-  return `[subagent ${record.type} — ${record.status}] ${record.task}`;
+  // D5: the id in the LLM-visible header is the handle the parent needs to
+  // address a re-engagement via subagents_send.
+  return `[subagent ${record.type} ${record.id} — ${record.status}] ${record.task}`;
 }
 
 // ─── persistence (D8) ─────────────────────────────────────────────────────────
@@ -431,6 +549,8 @@ function appendDispatchEntry(pi: ExtensionAPI, record: AgentRecord): void {
     task: record.task,
     assignment: record.assignment,
     spawnedAt: record.spawnedAt,
+    model: record.model,
+    pid: record.pid,
   };
   pi.appendEntry<DispatchData>(DISPATCH_ENTRY, data);
 }
@@ -442,12 +562,25 @@ function appendCompletionEntry(pi: ExtensionAPI, record: AgentRecord): void {
     messages: record.messages,
     usage: record.usage,
     model: record.model,
+    pid: record.pid,
     stopReason: record.stopReason,
     errorMessage: record.errorMessage,
     stderr: truncate(record.stderr),
     lost: record.lost,
+    ...(record.resumeSessionMissing ? { resumeSessionMissing: true as const } : {}),
   };
   pi.appendEntry<CompletionData>(COMPLETION_ENTRY, data);
+}
+
+/** D9c: persisted at every resume spawn so the orphan probe sees the latest child. */
+function appendEngagementEntry(pi: ExtensionAPI, record: AgentRecord): void {
+  const data: EngagementData = {
+    id: record.id,
+    message: record.assignment,
+    pid: record.pid,
+    at: Date.now(),
+  };
+  pi.appendEntry<EngagementData>(ENGAGEMENT_ENTRY, data);
 }
 
 // ─── delivery (D3) ────────────────────────────────────────────────────────────
@@ -587,9 +720,16 @@ function usageLine(usage: UsageStats): string {
   return parts.join(" ");
 }
 
+/**
+ * Live transcript overlay. Follows the transcript tail by default; scrolling up
+ * freezes the viewport so new lines append below the fold, and scrolling back to
+ * the bottom (down / pageDown / end) re-engages the live tail.
+ */
 class ReplayOverlay implements Component, Focusable {
   focused = false;
   private scroll = 0;
+  /** Live-tail mode: true while the window is pinned to the newest lines. */
+  private follow = true;
   private cachedWidth = -1;
   private cachedBody: string[] = [];
   private cachedMessagesKey = "";
@@ -673,21 +813,28 @@ class ReplayOverlay implements Component, Focusable {
 
   handleInput(data: string): void {
     const width = this.cachedWidth > 0 ? this.cachedWidth : 80;
+    const max = this.maxScroll(width);
     const page = Math.max(1, this.viewHeight() - 1);
     if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, Key.alt("o"))) {
       this.done(undefined);
     } else if (matchesKey(data, "up") || matchesKey(data, "k")) {
+      this.follow = false;
       this.scroll = Math.max(0, this.scroll - 1);
     } else if (matchesKey(data, "down") || matchesKey(data, "j")) {
-      this.scroll = Math.min(this.maxScroll(width), this.scroll + 1);
+      this.scroll = Math.min(max, this.scroll + 1);
+      this.follow = this.scroll >= max;
     } else if (matchesKey(data, "pageUp")) {
+      this.follow = false;
       this.scroll = Math.max(0, this.scroll - page);
     } else if (matchesKey(data, "pageDown") || matchesKey(data, "space")) {
-      this.scroll = Math.min(this.maxScroll(width), this.scroll + page);
+      this.scroll = Math.min(max, this.scroll + page);
+      this.follow = this.scroll >= max;
     } else if (matchesKey(data, "home")) {
+      this.follow = false;
       this.scroll = 0;
     } else if (matchesKey(data, "end")) {
-      this.scroll = this.maxScroll(width);
+      this.scroll = max;
+      this.follow = true;
     }
   }
 
@@ -697,13 +844,21 @@ class ReplayOverlay implements Component, Focusable {
     const body = this.buildBody(inner);
     const height = this.viewHeight();
     const max = Math.max(0, body.length - height);
-    if (this.scroll > max) this.scroll = max;
+    // Live tail: while following (or whenever the viewport lands at the bottom),
+    // stay pinned to the newest lines as the transcript grows. A frozen
+    // (scrolled-up) viewport keeps its offset; new lines append below the fold.
+    if (this.follow || this.scroll >= max) {
+      this.follow = true;
+      this.scroll = max;
+    }
     const window = body.slice(this.scroll, this.scroll + height);
     while (window.length < height) window.push("");
     const title = th.fg("toolTitle", th.bold(` Replay: ${this.record.type} `));
+    const overflow = body.length > height;
+    const followHint = overflow ? (this.follow ? " · live" : " · paused (pgdn to resume)") : "";
     const hint = th.fg(
       "dim",
-      ` ${body.length > height ? `${this.scroll + 1}-${Math.min(this.scroll + height, body.length)}/${body.length} · ` : ""}↑↓ scroll · Esc close `,
+      ` ${overflow ? `${this.scroll + 1}-${Math.min(this.scroll + height, body.length)}/${body.length} · ` : ""}↑↓ scroll${followHint} · Esc close `,
     );
     const lines = [title, ...window.map((l) => ` ${l}`), hint];
     return lines;
@@ -718,7 +873,12 @@ class ReplayOverlay implements Component, Focusable {
 
 // ─── record construction ──────────────────────────────────────────────────────
 
-function makeRecord(type: string, task: { description: string; assignment: string }, context: string | undefined): AgentRecord {
+function makeRecord(
+  type: string,
+  task: { description: string; assignment: string },
+  context: string | undefined,
+  model: string | undefined,
+): AgentRecord {
   const id = `sa-${Date.now().toString(36)}-${(idCounter++).toString(36)}`;
   const assignment = context ? `${context}\n\n${task.assignment}` : task.assignment;
   return {
@@ -730,7 +890,7 @@ function makeRecord(type: string, task: { description: string; assignment: strin
     messages: [],
     usage: newUsage(),
     spawnedAt: Date.now(),
-    model: undefined,
+    model,
     stopReason: undefined,
     errorMessage: undefined,
     stderr: "",
@@ -738,7 +898,35 @@ function makeRecord(type: string, task: { description: string; assignment: strin
     finalized: false,
     abortRequested: false,
     child: undefined,
+    pid: undefined,
+    restored: false,
+    suppressNextDelivery: false,
+    resumeSessionMissing: false,
+    run: undefined,
   };
+}
+
+/**
+ * Normalize a requested model reference to canonical "provider/model-id",
+ * validated against the available models. Accepts "provider/model-id" or a
+ * bare "model-id" (disambiguated via the available snapshot). Throws before
+ * anything is dispatched or persisted when the reference cannot be resolved.
+ */
+function resolveModelRef(ctx: ExtensionContext, value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const registry = ctx.modelRegistry;
+  const slash = value.indexOf("/");
+  const model =
+    slash > 0
+      ? registry.find(value.slice(0, slash), value.slice(slash + 1))
+      : registry.getAvailable().find((m) => m.id === value);
+  if (model) return `${model.provider}/${model.id}`;
+  const available = registry.getAvailable().map((m) => `${m.provider}/${m.id}`);
+  const preview = available.slice(0, 10).join(", ");
+  const more = available.length > 10 ? `, … (+${available.length - 10} more)` : "";
+  throw new Error(
+    `Unknown subagent model "${value}". Use "provider/model-id" (or a bare model id). Available models: ${preview}${more || "none"}.`,
+  );
 }
 
 // ─── parameters ───────────────────────────────────────────────────────────────
@@ -747,18 +935,45 @@ const TaskItem = Type.Object({
   id: Type.String({ description: "CamelCase task id." }),
   description: Type.String({ description: "Short UI label." }),
   assignment: Type.String({ description: "Complete self-contained assignment." }),
+  model: Type.Optional(
+    Type.String({ description: 'Model override for this task ("provider/model-id" or bare "model-id"). Wins over the dispatch-level model.' }),
+  ),
 });
 
 const SubagentParams = Type.Object({
   agent: Type.String({ description: "Agent type: explore, plan, designer, reviewer, librarian, oracle, task, or quick_task." }),
   tasks: Type.Array(TaskItem, { description: "Tasks to run as background subagents." }),
   context: Type.Optional(Type.String({ description: "Shared context prepended to every assignment." })),
+  model: Type.Optional(
+    Type.String({
+      description:
+        'Model for every task in this dispatch ("provider/model-id" or bare "model-id"). A per-task model wins. Omit: children resolve the harness default model — the currently selected model is NOT inherited.',
+    }),
+  ),
 });
 
 type SubagentParamsType = {
   agent: string;
-  tasks: Array<{ id: string; description: string; assignment: string }>;
+  tasks: Array<{ id: string; description: string; assignment: string; model?: string }>;
   context?: string;
+  model?: string;
+};
+
+const SendParams = Type.Object({
+  id: Type.String({ description: 'Registry id of the agent to message — from a result header ("[subagent task sa-8fk2 — done] …") or a dispatch acknowledgement.' }),
+  message: Type.String({ description: "New prompt for the agent's next engagement (e.g. reviewer feedback, a correction)." }),
+  interrupt: Type.Optional(
+    Type.Boolean({
+      description:
+        "Kill the agent's in-flight engagement first (SIGTERM with escalation), then resume its session with this message. Without it, a send to a running agent is rejected.",
+    }),
+  ),
+});
+
+type SendParamsType = {
+  id: string;
+  message: string;
+  interrupt?: boolean;
 };
 
 // ─── blocking fallback (D2) ────────────────────────────────────────────────────
@@ -783,18 +998,135 @@ function renderBlocking(records: AgentRecord[]): string {
     .join("\n\n---\n\n");
 }
 
-// ─── background start (dispatch path) ─────────────────────────────────────────
+// ─── engagement lifecycle (D4/D8/D9/D11) ─────────────────────────────────────
 
-function startAndFinalize(record: AgentRecord, cwd: string): void {
-  void (async () => {
+/**
+ * True when the recorded child pid may still be alive. EPERM (exists but not
+ * signalable by us) is treated as alive — the orphan probe fails safe.
+ */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException | undefined)?.code === "EPERM";
+  }
+}
+
+/**
+ * D8: the durable session file must exist before any resume spawn. pi's
+ * `--session-id` is create-or-open and the session file appears only at the
+ * first assistant message, so a missing file must fail the send explicitly —
+ * a silent fresh session would promise context that does not exist.
+ */
+function sessionFileExists(id: string): boolean {
+  const suffix = `_${id}${SESSION_FILE_SUFFIX}`;
+  let names: string[];
+  try {
+    names = fs.readdirSync(SESSION_DIR);
+  } catch (error) {
+    // A dir that was never created is a genuine miss; anything else (EACCES,
+    // EMFILE, …) must not be reported as "session missing" — the caller
+    // distinguishes the two.
+    if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return false;
+    throw error;
+  }
+  return names.some((f) => f.endsWith(suffix));
+}
+
+/**
+ * Reset the engagement-scoped fields and point the record at its new prompt.
+ * Every engagement start goes through this — including un-terminalizing a
+ * restored-lost record; without the `finalized` reset a resumed engagement
+ * would never finalize, persist, or deliver (D4).
+ */
+function beginEngagement(record: AgentRecord, prompt: string): void {
+  record.assignment = prompt;
+  record.status = "waiting";
+  record.stderr = "";
+  record.stopReason = undefined;
+  record.errorMessage = undefined;
+  record.finalized = false;
+  record.abortRequested = false;
+  record.lost = false;
+  record.suppressNextDelivery = false;
+  record.resumeSessionMissing = false;
+  record.child = undefined;
+  record.run = undefined;
+}
+
+/** SIGTERM with bounded SIGKILL escalation (shared by hotkey abort and send). */
+/**
+ * SIGTERM with bounded SIGKILL escalation (shared by operator hotkey abort and
+ * send interrupt). Two guard clauses before any state change:
+ *  - a record with no live child has nothing to kill;
+ *  - a child that already exited (exitCode/signalCode set) is about to close
+ *    with its real status — relabeling it "aborted" would misreport a finished
+ *    engagement and (via D11) suppress a real result (review finding 7).
+ * `suppressDelivery` is D11 attribution: only a send-initiated kill suppresses
+ * the intermediate aborted delivery, and only when this call actually
+ * initiates it — an operator abort racing a send keeps its diagnostics
+ * (review finding 8).
+ */
+function killChildEscalating(record: AgentRecord, opts?: { suppressDelivery?: boolean }): void {
+  const child = record.child;
+  if (!child || !stillRunning(child)) return;
+  if (opts?.suppressDelivery) record.suppressNextDelivery = true;
+  record.abortRequested = true;
+  record.status = "aborted";
+  try {
+    child.kill("SIGTERM");
+  } catch {
+    /* ignore */
+  }
+  setTimeout(() => {
     try {
-      await runChild(record, cwd, () => guard(repaintIndicator), undefined);
+      if (stillRunning(child)) child.kill("SIGKILL");
+    } catch {
+      /* ignore */
+    }
+  }, SIGKILL_ESCALATION_MS).unref();
+}
+
+/**
+ * Run one engagement of an agent: spawn the child, await its close, finalize
+ * (persist a completion entry — one per engagement — and, in interactive mode,
+ * deliver the result). `deliver` is the caller's default; D11 subtracts a
+ * send-initiated kill's intermediate aborted delivery.
+ */
+function runEngagement(
+  record: AgentRecord,
+  cwd: string,
+  opts: { resume: boolean; deliver: boolean; signal?: AbortSignal | undefined; message?: string },
+): Promise<void> {
+  const run = (async () => {
+    try {
+      await runChild(record, cwd, () => guard(repaintIndicator), opts.signal, {
+        resume: opts.resume,
+        message: opts.message,
+        onSpawned: (pid) => {
+          record.pid = pid;
+          // Exactly one dispatch entry per agent, written once the pid is
+          // known (D9c). Every resume spawn additionally appends an engagement
+          // entry carrying the new pid — without it, a parent crash mid-resume
+          // leaves the orphan invisible to the cross-restart probe (the last
+          // completion entry still names the previous, long-dead child).
+          const c = current;
+          if (!c) return;
+          if (!opts.resume) guard(() => appendDispatchEntry(c.pi, record));
+          else guard(() => appendEngagementEntry(c.pi, record));
+        },
+      });
     } catch {
       record.status = "failed";
     }
-    finalize(record, { deliver: true });
+    finalize(record, { deliver: opts.deliver && !record.suppressNextDelivery });
+    record.suppressNextDelivery = false;
+    record.run = undefined;
     guard(repaintIndicator);
   })();
+  record.run = run;
+  return run;
 }
 
 // ─── extension factory ─────────────────────────────────────────────────────────
@@ -810,9 +1142,11 @@ export default function (pi: ExtensionAPI) {
     current = { ctx, pi };
     registry.clear();
     selectedIndex = 0;
+    shuttingDown = false;
     guard(() => {
       const dispatches = new Map<string, DispatchData>();
       const completions = new Map<string, CompletionData>();
+      const engagements = new Map<string, EngagementData>();
       for (const entry of ctx.sessionManager.getEntries()) {
         if (entry.type !== "custom") continue;
         if (entry.customType === DISPATCH_ENTRY) {
@@ -821,6 +1155,10 @@ export default function (pi: ExtensionAPI) {
         } else if (entry.customType === COMPLETION_ENTRY) {
           const data = entry.data as CompletionData | undefined;
           if (data?.id) completions.set(data.id, data);
+        } else if (entry.customType === ENGAGEMENT_ENTRY) {
+          const data = entry.data as EngagementData | undefined;
+          // Later entries overwrite earlier ones: latest engagement wins.
+          if (data?.id) engagements.set(data.id, data);
         }
       }
       for (const [id, d] of dispatches) {
@@ -829,12 +1167,12 @@ export default function (pi: ExtensionAPI) {
           id,
           type: d.type,
           task: d.task,
-          assignment: d.assignment,
+          assignment: engagements.get(id)?.message ?? d.assignment,
           status: "aborted",
           messages: [],
           usage: newUsage(),
           spawnedAt: d.spawnedAt,
-          model: undefined,
+          model: d.model,
           stopReason: undefined,
           errorMessage: undefined,
           stderr: "",
@@ -842,6 +1180,15 @@ export default function (pi: ExtensionAPI) {
           finalized: true,
           abortRequested: false,
           child: undefined,
+          // Latest known pid across entry kinds: a completion entry covers
+          // completed engagements, an engagement entry covers a resume spawn
+          // that never completed (parent crash mid-re-engagement, review
+          // finding 2), the dispatch entry is the last resort.
+          pid: comp?.pid ?? engagements.get(id)?.pid ?? d.pid,
+          restored: true,
+          suppressNextDelivery: false,
+          resumeSessionMissing: comp?.resumeSessionMissing === true,
+          run: undefined,
         };
         if (comp) {
           record.status = comp.status;
@@ -869,6 +1216,9 @@ export default function (pi: ExtensionAPI) {
   // stray delivery into the replacement session after a switch). Capture the
   // children first because finalize clears record.child.
   pi.on("session_shutdown", async () => {
+    // Block any claimed-but-unspawned engagement from spawning after this
+    // handler has finalized and torn down (review finding 4).
+    shuttingDown = true;
     const live = [...registry.values()].filter((r) => !r.finalized);
     const children = live.map((r) => r.child).filter((c): c is ChildProcess => c !== undefined);
     for (const record of live) {
@@ -938,23 +1288,16 @@ export default function (pi: ExtensionAPI) {
     handler: () =>
       guard(() => {
         const record = selectedRecord();
-        // No-op on the parent, finished agents, or a record with no live child (4.3/D11).
-        if (!record || record.finalized || isTerminalStatus(record.status) || !record.child) return;
-        record.abortRequested = true;
-        record.status = "aborted";
-        try {
-          record.child.kill("SIGTERM");
-        } catch {
-          /* ignore */
+        // No-op on the parent or finished agents. A claimed-but-unspawned
+        // engagement (record.run pending, no child yet) is aborted via the
+        // flag — runChild's pre-spawn check ends it without ever spawning
+        // (review finding 11).
+        if (!record || record.finalized || isTerminalStatus(record.status)) return;
+        if (record.child) killChildEscalating(record);
+        else if (record.run) {
+          record.abortRequested = true;
+          record.status = "aborted";
         }
-        const child = record.child;
-        setTimeout(() => {
-          try {
-            if (child && stillRunning(child)) child.kill("SIGKILL");
-          } catch {
-            /* ignore */
-          }
-        }, SIGKILL_ESCALATION_MS).unref();
         repaintIndicator();
       }),
   });
@@ -965,12 +1308,17 @@ export default function (pi: ExtensionAPI) {
     description: [
       "Dispatch independent work to isolated background subagent processes that run concurrently with you.",
       "In interactive mode this returns immediately with a dispatch acknowledgement; each subagent's result arrives later as an automatic follow-up message — do not wait inline.",
+      "Each agent runs on a durable session: re-engage a finished, failed, or aborted agent with subagents_send (results carry the agent id in their header), or redirect an in-flight one with interrupt: true.",
       "Agent types: explore, plan, designer, reviewer, librarian, oracle, task, quick_task.",
+      'Optional model: "provider/model-id" runs the whole dispatch on that model; an optional per-task model overrides it per task. Omitted: each agent runs the harness default model — the currently selected model is not inherited. Resume engagements keep the dispatch-time model.',
     ].join(" "),
-    promptSnippet: "subagents — background parallel delegation; dispatch returns immediately, results arrive as follow-up messages.",
+    promptSnippet:
+      "subagents — background parallel delegation; dispatch returns immediately, results arrive as follow-up messages; subagents_send re-engages or redirects an agent by id.",
     promptGuidelines: [
       "Use subagents for independent subtasks; each assignment must be self-contained and subagents must skip project-wide gates/formatters.",
       "In interactive mode dispatch is non-blocking: continue other work; results are delivered automatically as follow-up turns. Track/replay/abort agents from the indicator line (alt+, / alt+. select, alt+o replay, alt+x abort).",
+      'Pass model ("provider/model-id") to run agents on a specific model; a per-task model overrides the dispatch-level value. Without it, agents run the harness default model, not your current selection.',
+      "Iterate with subagents_send: route reviewer feedback to the implementer's id, or interrupt: true to kill-and-redirect a running agent; cap fix iterations (2–3) before reporting residual issues.",
     ],
     parameters: SubagentParams,
     executionMode: "parallel",
@@ -981,18 +1329,20 @@ export default function (pi: ExtensionAPI) {
       if (params.tasks.length === 0) {
         return { content: [{ type: "text", text: "No tasks supplied." }], details: { results: [] } };
       }
-      const records = params.tasks.map((task) => makeRecord(params.agent, task, params.context));
-      for (const record of records) {
-        registry.set(record.id, record);
-        guard(() => appendDispatchEntry(pi, record));
-      }
+      // Validate every requested model before registering or spawning anything so a
+      // bad reference fails the whole call without side effects (precedence:
+      // task > dispatch > harness default).
+      const records = params.tasks.map((task) =>
+        makeRecord(params.agent, task, params.context, resolveModelRef(ctx, task.model ?? params.model)),
+      );
+      for (const record of records) registry.set(record.id, record);
       guard(repaintIndicator);
 
       // D2: dispatch-and-return only in the interactive TUI. Everywhere else run
       // blocking and return aggregated results (background delivery would be
       // lost when the non-interactive process exits at end of turn).
       if (ctx.mode === "tui") {
-        for (const record of records) startAndFinalize(record, ctx.cwd);
+        for (const record of records) void runEngagement(record, ctx.cwd, { resume: false, deliver: true });
         const names = records.map((r) => `${r.type}:${r.task}`).join(", ");
         const ack = `Dispatched ${records.length} background subagent(s): ${names}. They run detached; results will arrive automatically as follow-up messages. Track them on the indicator line below the prompt (alt+, / alt+. select, alt+o replay, alt+x abort). Continue other work — do not wait inline.`;
         return {
@@ -1002,15 +1352,139 @@ export default function (pi: ExtensionAPI) {
       }
 
       await mapLimit(records, MAX_CONCURRENCY, async (record) => {
-        await runChild(record, ctx.cwd, () => guard(repaintIndicator), signal);
-        finalize(record, { deliver: false });
-        guard(repaintIndicator);
+        await runEngagement(record, ctx.cwd, { resume: false, deliver: false, signal });
       });
       // No terminate on failure: it would end the agent loop, so the model
       // could never read the per-task results and retry.
       return {
         content: [{ type: "text", text: renderBlocking(records) }],
         details: { results: records.map((r) => ({ id: r.id, type: r.type, task: r.task, status: r.status })) },
+      };
+    },
+  });
+
+  // D3: parent-facing re-engagement. Sequential execution mode plus the
+  // synchronous checks below (before the first spawn) close the check-then-act
+  // windows against concurrent sends and the operator hotkey (D9).
+  pi.registerTool<typeof SendParams, { sent?: unknown; results?: unknown }>({
+    name: "subagents_send",
+    label: "Subagents: send",
+    description: [
+      "Send a new prompt to an existing subagent, identified by the id in its result header or dispatch acknowledgement.",
+      "A terminal agent (done/failed/aborted) resumes its durable session with full prior context — transcript, usage, and identity are preserved; the result arrives as a follow-up message like any other engagement (inline in non-interactive mode).",
+      "With interrupt: true, an in-flight agent is killed (SIGTERM with escalation) and immediately resumed on its session with the new message as a corrective prompt; the killed engagement delivers no aborted diagnostics.",
+      "Without interrupt, a send to a running agent is rejected — wait for its result or pass interrupt: true.",
+      "Re-engagement is scoped to the current working directory; a missing durable session file fails the send explicitly instead of silently starting a blank session.",
+    ].join(" "),
+    promptSnippet:
+      "subagents_send — re-engage a finished subagent with full prior context, or kill-and-redirect an in-flight one via interrupt: true.",
+    promptGuidelines: [
+      "Address agents by the id in their result header (e.g. [subagent task sa-8fk2 — done] …).",
+      "Prefer re-engaging over redispatching when an agent needs feedback or correction — it keeps its context; route reviewer feedback to the implementer's id.",
+      "Sends run sequentially; cap fix iterations (2–3) before reporting residual issues back instead of ping-ponging.",
+    ],
+    parameters: SendParams,
+    executionMode: "sequential",
+    async execute(_toolCallId, params: SendParamsType, signal, _onUpdate, ctx) {
+      const record = registry.get(params.id);
+      if (!record) {
+        const known = [...registry.keys()].join(", ");
+        throw new Error(`Unknown subagent id "${params.id}". Known ids: ${known || "none (nothing dispatched this session)"}.`);
+      }
+      if (!params.message.trim()) throw new Error("message is empty.");
+
+      let redirected = false;
+      if (record.child || record.run) {
+        // In flight — a live child, or an engagement claimed but not yet
+        // spawned (record.run is set synchronously; record.child only after
+        // the prompt staging awaits). Without interrupt this is a rejection,
+        // not a queue (D3), and the check covers the pre-spawn window too
+        // (review finding 1: a second send used to slip through and drop its
+        // message while clobbering the first engagement's prompt).
+        if (!params.interrupt) {
+          throw new Error(
+            `Subagent ${record.id} (${record.type}) is still running. Wait for its result, or resend with interrupt: true to kill it and redirect.`,
+          );
+        }
+        redirected = true;
+        if (record.child) {
+          // D11: the killed engagement persists its completion entry but
+          // delivers no aborted diagnostics — the suppression is attributed
+          // inside killChildEscalating, so it applies only when this call
+          // actually initiates the kill of a live child (review finding 8).
+          killChildEscalating(record, { suppressDelivery: true });
+        } else {
+          // Claimed but not yet spawned: abort the pending engagement at
+          // runChild's pre-spawn check; D11 keeps its (empty) aborted entry
+          // undelivered.
+          record.suppressNextDelivery = true;
+          record.abortRequested = true;
+          record.status = "aborted";
+        }
+        guard(repaintIndicator);
+        await record.run;
+      }
+
+      // D9c: a restored record whose recorded child may still be running must
+      // not gain a second writer on its session file. Fails safe on EPERM.
+      if (record.restored && record.pid !== undefined && pidAlive(record.pid)) {
+        throw new Error(
+          `Refusing to re-engage ${record.id}: recorded child process ${record.pid} appears to still be running (orphaned from a previous pi run) and may be writing its durable session.`,
+        );
+      }
+      // D8: a previous resume that recreated a blank session poisons this
+      // agent for good — the flag is persisted on that failed engagement's
+      // completion entry and restored with the record. The blank file now
+      // exists, so the existence scan alone would silently "succeed" (review
+      // finding 3).
+      if (record.resumeSessionMissing) {
+        throw new Error(
+          `Cannot re-engage ${record.id}: its durable session went missing on a previous attempt (the resume child recreated a blank one). Dispatch a fresh subagent instead.`,
+        );
+      }
+      // D9c: a restored record whose recorded child may still be running must
+      // not gain a second writer on its session file. Fails safe on EPERM.
+      if (record.restored && record.pid !== undefined && pidAlive(record.pid)) {
+        throw new Error(
+          `Refusing to re-engage ${record.id}: recorded child process ${record.pid} appears to still be running (orphaned from a previous pi run) and may be writing its durable session.`,
+        );
+      }
+      // D8: no durable session, no re-engagement — never silently create one.
+      // A scan error (permissions, fd exhaustion) is distinct from a miss and
+      // must not be misdiagnosed as "session missing" (review finding 9).
+      let sessionPresent: boolean;
+      try {
+        sessionPresent = sessionFileExists(record.id);
+      } catch (error) {
+        throw new Error(
+          `Cannot re-engage ${record.id}: durable session directory could not be scanned (${error instanceof Error ? error.message : String(error)}). Not attempting a resume on an unverifiable session.`,
+        );
+      }
+      if (!sessionPresent) {
+        throw new Error(
+          `Cannot re-engage ${record.id}: durable session missing (never created — e.g. the agent was killed before its first response — or reclaimed). Dispatch a fresh subagent instead.`,
+        );
+      }
+
+      // D4: reset the engagement-scoped fields — including un-terminalizing a
+      // restored-lost record — or the resumed engagement never finalizes.
+      beginEngagement(record, params.message);
+      guard(repaintIndicator);
+
+      if (ctx.mode === "tui") {
+        void runEngagement(record, ctx.cwd, { resume: true, deliver: true, message: params.message });
+        const verb = redirected ? "interrupted and redirected" : "re-engaged";
+        const ack = `Sent to subagent ${record.type} ${record.id} (${verb}). It resumes its durable session with your message as the new prompt; its result will arrive automatically as a follow-up message. Do not wait inline.`;
+        return {
+          content: [{ type: "text", text: ack }],
+          details: { sent: { id: record.id, type: record.type, task: record.task, status: record.status } },
+        };
+      }
+
+      await runEngagement(record, ctx.cwd, { resume: true, deliver: false, signal, message: params.message });
+      return {
+        content: [{ type: "text", text: resultBody(record) }],
+        details: { results: [{ id: record.id, type: record.type, task: record.task, status: record.status }] },
       };
     },
   });

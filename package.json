@@ -12,6 +12,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "smoke": "node scripts/smoke.mjs",
+    "test:subagents": "node scripts/subagents-harness.mjs",
     "test:e2e": "bash e2e/run.sh",
     "setup": "node scripts/bootstrap.mjs",
     "postinstall": "node scripts/postinstall.mjs"

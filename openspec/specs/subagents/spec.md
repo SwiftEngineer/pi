@@ -1,5 +1,8 @@
-## ADDED Requirements
+# subagents Specification
 
+## Purpose
+TBD - created by archiving change background-subagents. Update Purpose after archive.
+## Requirements
 ### Requirement: Background dispatch
 The subagent tool MUST spawn one isolated `pi` child process per task. In interactive TUI mode it MUST return a dispatch acknowledgement immediately, without waiting for any child to finish, so the parent agent remains interactive during subagent execution. In non-interactive modes it MUST instead execute blocking: await all children and return their aggregated results as the tool result.
 
@@ -14,6 +17,22 @@ The subagent tool MUST spawn one isolated `pi` child process per task. In intera
 #### Scenario: Blocking fallback outside the TUI
 - **WHEN** the subagent tool is invoked while the harness runs in a non-interactive mode (`json`, `print`, or `rpc`)
 - **THEN** the tool awaits all spawned children and returns their aggregated results directly as the tool result, because non-interactive processes exit when the turn ends and background delivery would be lost.
+
+#### Scenario: Dispatch-level model selection
+- **WHEN** the tool is called with a dispatch-level `model` ("provider/model-id", or a bare `model-id` resolved against the available models) and tasks without their own model
+- **THEN** every spawned child for that dispatch runs that model, passed to the child as `--model`.
+
+#### Scenario: Per-task model override
+- **WHEN** a task entry carries its own `model`
+- **THEN** that task's child runs the task's model, overriding the dispatch-level value.
+
+#### Scenario: Unknown model fails fast
+- **WHEN** a requested model does not resolve to an available model
+- **THEN** the tool call fails with an error naming the unresolvable reference and listing available models, and no child is spawned and no dispatch entry is persisted.
+
+#### Scenario: No model requested
+- **WHEN** neither the dispatch nor any task specifies a model
+- **THEN** children resolve their model exactly as a plain `pi` invocation would (the harness default), and the parent's current in-session selection is not propagated.
 
 ### Requirement: No nested delegation
 Subagent child processes MUST NOT have access to the delegation tool. Children are spawned with a subagent marker (`SWIFT_PI_SUBAGENT=1`) in their environment; when the marker is set, the extension MUST register no tool, UI, or shortcuts, and the harness system prompt MUST omit its delegation guidance.
@@ -60,11 +79,23 @@ Two registered hotkeys MUST move a single selector one indicator left and one in
 - **THEN** the selector advances to the next or previous indicator, wrapping from last to first and vice versa, and the indicator line is repainted to highlight the newly selected indicator.
 
 ### Requirement: Session replay viewer
-Opening the currently selected agent MUST display its full captured message stream — from the initial assignment through every assistant turn and tool result to the final message — in a keyboard-focused overlay.
+Opening the currently selected agent MUST display its full captured message stream — from the initial assignment through every assistant turn and tool result to the final message — in a keyboard-focused overlay. While the captured stream is still growing, the overlay MUST follow the live tail: the viewport stays pinned to the newest lines unless the operator scrolls up, and scrolling back to the bottom re-engages the live tail.
 
 #### Scenario: Open selected agent
 - **WHEN** the operator triggers open on a selected subagent indicator
 - **THEN** an overlay (`ctx.ui.custom`) renders that agent's complete message log, including tool calls and their results, and remains until the operator dismisses it.
+
+#### Scenario: Live tail while in flight
+- **WHEN** new transcript lines arrive while the overlay is open on an in-flight agent and the viewport is at the bottom
+- **THEN** the viewport stays anchored to the newest lines as they arrive, with no operator input required.
+
+#### Scenario: Scrolling up freezes the tail
+- **WHEN** the operator pages or lines up while the overlay is open
+- **THEN** the viewport stays fixed on the lines being read even as new transcript lines arrive; the new lines accumulate below the fold and the feed keeps updating.
+
+#### Scenario: Returning to the bottom resumes the tail
+- **WHEN** the operator pages or lines down until the viewport reaches the bottom of the transcript, or presses the end key
+- **THEN** the live tail re-engages and the viewport stays pinned to the newest lines again.
 
 #### Scenario: Open on parent indicator
 - **WHEN** the selected indicator is the parent `[⊤]`
@@ -125,3 +156,4 @@ The extension MUST re-bind its live Pi context/UI reference on every session sta
 #### Scenario: Background callback error containment
 - **WHEN** a background callback (child stdout handler, completion handler) encounters an error, including a stale-context throw
 - **THEN** the error is caught and contained and never propagates as an uncaught exception.
+

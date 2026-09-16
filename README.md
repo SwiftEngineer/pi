@@ -8,7 +8,7 @@ A custom distribution of the [Pi coding agent](https://www.npmjs.com/package/@ea
 | **[`pi-mcp-adapter`](https://github.com/nicobailon/pi-mcp-adapter)** | Access every MCP server through a single ~200-token proxy tool, with lazy connections and idle disconnect — instead of paying 10k+ tokens per server. |
 | **[`pi-web-access`](https://github.com/nicobailon/pi-web-access)** | Web search and content extraction: `web_search` (OpenAI/Brave/Parallel/Tavily/Exa/Perplexity/Gemini with fallback chains), `fetch_content` (URLs, GitHub repos, YouTube, PDFs), `get_search_content`. |
 | **[`pi-powerline-footer`](https://github.com/nicobailon/pi-powerline-footer)** | Powerline-style segmented footer for the Pi TUI: cwd/branch, context %, tokens/cost, model • thinking • provider. |
-| **[`pi-better-edit`](https://github.com/Rianico/pi-better-edit)** | Hash-anchored `read`/`edit`: content hashes replace line numbers, so edits land on the right line every time — stale or unseen ranges are hard-rejected with fresh anchors, old text is never re-typed, and same-file edits batch atomically. |
+| **[`pi-hashline-edit-pro`](https://github.com/YuGiMob/pi-hashline-edit-pro)** | Hash-anchored `read`/`edit`: content hashes replace line numbers, so edits land on the right line every time — stale or unseen ranges are hard-rejected with fresh anchors, old text is never re-typed, and same-file edits batch atomically. |
 
 ## Install
 
@@ -23,7 +23,7 @@ This repo is **private**, so the one-liner installs over SSH. It works on any ma
 What it does, in order:
 
 1. Installs the pinned Pi coding agent globally (`@earendil-works/pi-coding-agent@0.84.4`), replacing any stale/faulty `pi` on your PATH.
-2. Registers the harness and the plugins (`pi-mcp-adapter`, `pi-web-access`, `pi-powerline-footer`, `pi-better-edit`) via `pi install`.
+2. Registers the harness and the plugins via `pi install`.
 3. Configures `pi-web-access` to run headless: forces `"workflow": "none"` and `"autoOpenBrowser": false` in `~/.pi/web-search.json` (respecting `PI_CODING_AGENT_DIR` / `XDG_CONFIG_HOME`). Existing config keys are preserved, so re-running the installer never wipes your provider keys. Without this, every `web_search` opens an interactive curator page in your browser and waits for manual approval.
 
 ### Prerequisites
@@ -105,6 +105,6 @@ pi remove ssh://git@github.com/SwiftEngineer/pi
 pi remove npm:pi-mcp-adapter
 pi remove npm:pi-web-access
 pi remove https://github.com/nicobailon/pi-powerline-footer
-pi remove https://github.com/Rianico/pi-better-edit
+pi remove https://github.com/YuGiMob/pi-hashline-edit-pro
 npm uninstall -g @earendil-works/pi-coding-agent
 ```

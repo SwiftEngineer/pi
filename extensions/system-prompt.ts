@@ -7,13 +7,20 @@ const IS_SUBAGENT = !!process.env.SWIFT_PI_SUBAGENT;
 // Tool-routing line — the closing clause about delegation is dropped for children.
 const TOOL_ROUTING_TOOLS = IS_SUBAGENT
   ? "Use read for file contents, ls for directory listings, find for filename/glob lookup, search for regex content lookup, AST tools for structural code search/rewrites, todo_write for phased task state, and ask for structured user questions."
-  : "Use read for file contents, ls for directory listings, find for filename/glob lookup, search for regex content lookup, AST tools for structural code search/rewrites, todo_write for phased task state, ask for structured user questions, and subagents to dispatch independent work to isolated background agents.";
+  : "Use read for file contents, ls for directory listings, find for filename/glob lookup, search for regex content lookup, AST tools for structural code search/rewrites, todo_write for phased task state, ask for structured user questions, subagents to dispatch independent work to isolated background agents, and subagents_send to re-engage an existing subagent by id.";
 
-// Workflow delegation bullet — omitted entirely for children; for the parent it
-// teaches the non-blocking dispatch-ack + follow-up-delivery contract.
+// Workflow delegation bullets — omitted entirely for children. For the parent
+// they teach the non-blocking dispatch contract and the send contract (D7):
+// results carry agent ids; subagents_send re-engages (e.g. reviewer feedback
+// to the implementer) or redirects with interrupt; sends serialize; cap fix
+// iterations.
 const DELEGATION_WORKFLOW = IS_SUBAGENT
   ? ""
-  : "\n- Parallelize independent investigation or edits with the subagents tool when useful; assignments must be self-contained and subagents must not run project-wide gates or formatters. In interactive mode the subagents tool returns a dispatch acknowledgement immediately and each subagent's result arrives later as an automatic follow-up message — do not block waiting for results inline; keep working and incorporate each result when its follow-up turn lands.";
+  : [
+      "",
+      "- Parallelize independent investigation or edits with the subagents tool when useful; assignments must be self-contained and subagents must not run project-wide gates or formatters. In interactive mode the subagents tool returns a dispatch acknowledgement immediately and each subagent's result arrives later as an automatic follow-up message — do not block waiting for results inline; keep working and incorporate each result when its follow-up turn lands.",
+      "- Iterate with subagents_send instead of redispatching: results carry the agent id in their header; subagents_send re-engages a finished or failed agent with its full prior context (e.g. route reviewer feedback to the implementer's id), and interrupt: true kills-and-redirects an in-flight one. Sends serialize; cap fix iterations (2–3) before reporting residual issues back instead of ping-ponging.",
+    ].join("\n");
 
 const COMPACT_SYSTEM_PROMPT = `You are a staff-level coding agent. Optimize for correctness first, maintainability second, brevity third.
 

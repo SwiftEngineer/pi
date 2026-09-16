@@ -443,7 +443,7 @@ if (!astResult.content[0].text.includes("AGENT_PROMPTS")) throw new Error("ast_g
   }
 }
 
-for (const required of ["search", "ast_grep", "ast_edit", "todo_write", "ask", "subagents", "ls", "find"]) {
+for (const required of ["search", "ast_grep", "ast_edit", "todo_write", "ask", "subagents", "subagents_send", "ls", "find"]) {
   if (!tools.has(required)) throw new Error(`missing tool: ${required}`);
 }
 
