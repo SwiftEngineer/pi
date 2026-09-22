@@ -1,6 +1,6 @@
 // Vendored Z.ai model catalog, flattened.
 //
-// Source: @earendil-works/pi-ai 0.84.4 — this is `Object.values(ZAI_MODELS)`
+// Source: @earendil-works/pi-ai 0.87.0 — this is `Object.values(ZAI_MODELS)`
 // from `providers/zai` (i.e. `flattenModelCatalog("zai", data/zai.json)`),
 // serialized verbatim. pi's extension loader only aliases the pi-ai root
 // entrypoint, so `providers/zai` (and the `zai.models`/`model-catalog` modules
@@ -26,12 +26,14 @@ export const ZAI_MODELS: Model<"openai-completions">[] = [
     provider: "zai",
     baseUrl: "https://api.z.ai/api/coding/paas/v4",
     reasoning: true,
-    input: ["text"],
+    input: [
+      "text"
+    ],
     cost: {
       input: 0.6,
       output: 2.2,
       cacheRead: 0.11,
-      cacheWrite: 0,
+      cacheWrite: 0
     },
     compat: {
       supportsStore: false,
@@ -39,10 +41,11 @@ export const ZAI_MODELS: Model<"openai-completions">[] = [
       supportsReasoningEffort: false,
       maxTokensField: "max_tokens",
       thinkingFormat: "zai",
-      zaiToolStream: true,
+      supportsStrictMode: true,
+      zaiToolStream: true
     },
     contextWindow: 204800,
-    maxTokens: 131072,
+    maxTokens: 131072
   },
   {
     id: "glm-5-turbo",
@@ -51,12 +54,14 @@ export const ZAI_MODELS: Model<"openai-completions">[] = [
     provider: "zai",
     baseUrl: "https://api.z.ai/api/coding/paas/v4",
     reasoning: true,
-    input: ["text"],
+    input: [
+      "text"
+    ],
     cost: {
       input: 1.2,
       output: 4,
       cacheRead: 0.24,
-      cacheWrite: 0,
+      cacheWrite: 0
     },
     compat: {
       supportsStore: false,
@@ -64,10 +69,11 @@ export const ZAI_MODELS: Model<"openai-completions">[] = [
       supportsReasoningEffort: false,
       maxTokensField: "max_tokens",
       thinkingFormat: "zai",
-      zaiToolStream: true,
+      supportsStrictMode: true,
+      zaiToolStream: true
     },
     contextWindow: 200000,
-    maxTokens: 131072,
+    maxTokens: 131072
   },
   {
     id: "glm-5.2",
@@ -83,14 +89,16 @@ export const ZAI_MODELS: Model<"openai-completions">[] = [
       medium: null,
       high: "high",
       xhigh: null,
-      max: "max",
+      max: "max"
     },
-    input: ["text"],
+    input: [
+      "text"
+    ],
     cost: {
       input: 1.4,
       output: 4.4,
       cacheRead: 0.26,
-      cacheWrite: 0,
+      cacheWrite: 0
     },
     compat: {
       supportsStore: false,
@@ -98,10 +106,11 @@ export const ZAI_MODELS: Model<"openai-completions">[] = [
       supportsReasoningEffort: true,
       maxTokensField: "max_tokens",
       thinkingFormat: "zai",
-      zaiToolStream: true,
+      supportsStrictMode: true,
+      zaiToolStream: true
     },
     contextWindow: 1000000,
-    maxTokens: 131072,
+    maxTokens: 131072
   },
   {
     id: "glm-5.2-highspeed",
@@ -117,14 +126,16 @@ export const ZAI_MODELS: Model<"openai-completions">[] = [
       medium: null,
       high: "high",
       xhigh: null,
-      max: "max",
+      max: "max"
     },
-    input: ["text"],
+    input: [
+      "text"
+    ],
     cost: {
       input: 0,
       output: 0,
       cacheRead: 0,
-      cacheWrite: 0,
+      cacheWrite: 0
     },
     compat: {
       supportsStore: false,
@@ -132,10 +143,11 @@ export const ZAI_MODELS: Model<"openai-completions">[] = [
       supportsReasoningEffort: true,
       maxTokensField: "max_tokens",
       thinkingFormat: "zai",
-      zaiToolStream: true,
+      supportsStrictMode: true,
+      zaiToolStream: true
     },
     contextWindow: 1000000,
-    maxTokens: 131072,
+    maxTokens: 131072
   },
   {
     id: "glm-5.3",
@@ -151,14 +163,16 @@ export const ZAI_MODELS: Model<"openai-completions">[] = [
       medium: null,
       high: "high",
       xhigh: null,
-      max: "max",
+      max: "max"
     },
-    input: ["text"],
+    input: [
+      "text"
+    ],
     cost: {
       input: 1.4,
       output: 4.4,
       cacheRead: 0.26,
-      cacheWrite: 0,
+      cacheWrite: 0
     },
     compat: {
       supportsStore: false,
@@ -166,10 +180,11 @@ export const ZAI_MODELS: Model<"openai-completions">[] = [
       supportsReasoningEffort: true,
       maxTokensField: "max_tokens",
       thinkingFormat: "zai",
-      zaiToolStream: true,
+      supportsStrictMode: true,
+      zaiToolStream: true
     },
     contextWindow: 1000000,
-    maxTokens: 131072,
+    maxTokens: 131072
   },
   {
     id: "glm-5.3-flash",
@@ -185,14 +200,17 @@ export const ZAI_MODELS: Model<"openai-completions">[] = [
       medium: null,
       high: "high",
       xhigh: null,
-      max: "max",
+      max: "max"
     },
-    input: ["text", "image"],
+    input: [
+      "text",
+      "image"
+    ],
     cost: {
-      input: 0.075,
-      output: 0.25,
-      cacheRead: 0.015,
-      cacheWrite: 0,
+      input: 0.15,
+      output: 0.5,
+      cacheRead: 0.03,
+      cacheWrite: 0
     },
     compat: {
       supportsStore: false,
@@ -200,10 +218,21 @@ export const ZAI_MODELS: Model<"openai-completions">[] = [
       supportsReasoningEffort: true,
       maxTokensField: "max_tokens",
       thinkingFormat: "zai",
-      zaiToolStream: true,
+      supportsStrictMode: true,
+      zaiToolStream: true
     },
     contextWindow: 1000000,
     maxTokens: 131072,
+    inputLimits: {
+      images: {
+        resize: {
+          maxWidth: 2000,
+          maxHeight: 2000,
+          maxBytes: 4718592,
+          jpegQuality: 80
+        }
+      }
+    }
   },
   {
     id: "glm-5.3-highspeed",
@@ -219,14 +248,16 @@ export const ZAI_MODELS: Model<"openai-completions">[] = [
       medium: null,
       high: "high",
       xhigh: null,
-      max: "max",
+      max: "max"
     },
-    input: ["text"],
+    input: [
+      "text"
+    ],
     cost: {
       input: 0,
       output: 0,
       cacheRead: 0,
-      cacheWrite: 0,
+      cacheWrite: 0
     },
     compat: {
       supportsStore: false,
@@ -234,9 +265,11 @@ export const ZAI_MODELS: Model<"openai-completions">[] = [
       supportsReasoningEffort: true,
       maxTokensField: "max_tokens",
       thinkingFormat: "zai",
-      zaiToolStream: true,
+      supportsStrictMode: true,
+      zaiToolStream: true
     },
     contextWindow: 1000000,
-    maxTokens: 131072,
-  },
+    maxTokens: 131072
+  }
 ];
+

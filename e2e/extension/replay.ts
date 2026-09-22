@@ -116,23 +116,35 @@ export default function (pi: ExtensionAPI) {
   // resolves to faux and the persisted provider/model/api match the recording.
   // The dummy baseUrl/apiKey satisfy pi's provider validation without ever
   // being used — streamSimple short-circuits any real request.
-  pi.registerProvider(meta.provider, {
-    name: "E2E Replay",
-    api: meta.api,
-    baseUrl: "http://127.0.0.1:9/e2e-replay",
-    apiKey: "e2e-dummy-key",
-    streamSimple: faux.streamSimple,
-    models: [
-      {
-        id: meta.modelId,
-        name: `${meta.modelId} (replay)`,
-        reasoning: meta.reasoning,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: meta.contextWindow,
-        maxTokens: meta.maxTokens,
-      },
-    ],
+  //
+  // pi >= 0.87.0 flushes load-time registrations config-first, then native:
+  // registerNativeProvider deletes any same-id config registration. The
+  // harness's zai-compat.ts (a package extension that loads after this CLI
+  // extension) registers a native "zai" provider, so a load-time
+  // registration here would be clobbered and the replay would die on the
+  // real provider's auth ("No API key found for zai"). Registering from
+  // session_start — which fires after every load-time registration has been
+  // applied — takes the immediate path and lands last, so the faux provider
+  // deterministically serves the recorded provider for the whole session.
+  pi.on("session_start", () => {
+    pi.registerProvider(meta.provider, {
+      name: "E2E Replay",
+      api: meta.api,
+      baseUrl: "http://127.0.0.1:9/e2e-replay",
+      apiKey: "e2e-dummy-key",
+      streamSimple: faux.streamSimple,
+      models: [
+        {
+          id: meta.modelId,
+          name: `${meta.modelId} (replay)`,
+          reasoning: meta.reasoning,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: meta.contextWindow,
+          maxTokens: meta.maxTokens,
+        },
+      ],
+    });
   });
 
   // Tool stubbing. Skipped entirely when PI_E2E_LIVE_TOOLS=1 (real tools run).

@@ -45,9 +45,9 @@ import {
   createProvider,
   envApiKeyAuth,
   openAICompletionsApi,
-  type Context,
   type ProviderStreams,
   type Tool,
+  type TranscriptContext,
 } from "@earendil-works/pi-ai/compat";
 import { ZAI_MODELS } from "./zai-models.ts";
 
@@ -121,22 +121,36 @@ function rewriteForZai(schema: unknown): unknown {
   return node;
 }
 
-/** Clone the context with every tool's parameter schema rewritten. */
-function zaiSafeContext(context: Context): Context {
-  if (!context.tools || context.tools.length === 0) return context;
-  const tools: Tool[] = context.tools.map((tool) => ({
-    ...tool,
-    parameters: rewriteForZai(tool.parameters) as Tool["parameters"],
-  }));
-  return { ...context, tools };
+/**
+ * Clone the transcript with every declared tool's parameter schema rewritten.
+ * Since pi-ai 0.87.0, transports receive a normalized TranscriptContext: tool
+ * declarations live on system messages (`toolsAdded`), never on the context
+ * itself. Only messages that declare tools are replaced; the brand is
+ * restored with the same cast `normalizeContext()` uses internally.
+ */
+function zaiSafeTranscript(context: TranscriptContext): TranscriptContext {
+  if (!context.messages.some((m) => m.role === "system" && (m.toolsAdded?.length ?? 0) > 0)) {
+    return context;
+  }
+
+  const messages = context.messages.map((message) => {
+    const declared = message.role === "system" ? message.toolsAdded : undefined;
+    if (!declared?.length) return message;
+    const toolsAdded: Tool[] = declared.map((tool) => ({
+      ...tool,
+      parameters: rewriteForZai(tool.parameters) as Tool["parameters"],
+    }));
+    return { ...message, toolsAdded };
+  });
+  return { messages } as TranscriptContext;
 }
 
 export default function (pi: ExtensionAPI) {
   const inner: ProviderStreams = openAICompletionsApi();
 
   const safeApi: ProviderStreams = {
-    stream: (model, context, options) => inner.stream(model, zaiSafeContext(context), options),
-    streamSimple: (model, context, options) => inner.streamSimple(model, zaiSafeContext(context), options),
+    stream: (model, context, options) => inner.stream(model, zaiSafeTranscript(context), options),
+    streamSimple: (model, context, options) => inner.streamSimple(model, zaiSafeTranscript(context), options),
   };
 
   // Replicates pi-ai's zaiProvider() (dist/providers/zai.ts) field-for-field,
