@@ -15,6 +15,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import os from "node:os";
 import path from "node:path";
 import { configureWebAccess } from "./web-access-config.mjs";
 
@@ -29,6 +30,14 @@ const HARNESS_OVERRIDE = process.env.PI_HARNESS_SOURCE || null;
 
 const MIN_NODE = [22, 19, 0];
 
+// Packages the distribution once shipped in distribution.json but no longer
+// does. Machines installed through an older distribution keep them in
+// ~/.pi/agent/settings.json, and pi >= 0.87 refuses to launch when two
+// extensions register the same tool name — pi-better-edit's `read` collides
+// with pi-hashline-edit-pro's, which superseded it in "subagents v2". The
+// installer prunes these so updates self-heal instead of dead-locking launch.
+const SUPERSEDED_PACKAGES = new Set(["pi-better-edit"]);
+
 function fail(message) {
   console.error(`\n✖ ${message}`);
   process.exit(1);
@@ -42,6 +51,10 @@ function run(cmd, args, opts = {}) {
   try {
     execFileSync(cmd, args, { stdio: "inherit", shell: isWin, ...opts });
   } catch {
+    if (opts.tolerant) {
+      console.error(`  (ignored: ${cmd} ${args.join(" ")} failed)`);
+      return;
+    }
     fail(`command failed: ${cmd} ${args.join(" ")}`);
   }
 }
@@ -52,6 +65,48 @@ function have(cmd) {
     return true;
   } catch {
     return false;
+  }
+}
+
+// npm spec ("npm:name", "npm:@scope/name@ver") or git/https source -> package
+// name, so superseded entries match regardless of how they were installed.
+function packageNameFromSource(source) {
+  const trimmed = String(source).trim();
+  if (trimmed.startsWith("npm:")) {
+    const spec = trimmed.slice(4);
+    const at = spec.lastIndexOf("@");
+    return at > 0 ? spec.slice(0, at) : spec;
+  }
+  const lastSegment = trimmed
+    .replace(/^(https?|ssh|git):\/\//, "")
+    .replace(/^git@/, "")
+    .split("/")
+    .pop();
+  return (lastSegment ?? "").replace(/\.git$/, "").replace(/@[^@]*$/, "");
+}
+
+// Remove settings.json entries for distribution packages the manifest no longer
+// lists. Best-effort: a missing/corrupt settings file or a failed `pi remove`
+// never blocks the install.
+function pruneSupersededPackages() {
+  const agentDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+  let packages;
+  try {
+    packages = JSON.parse(readFileSync(path.join(agentDir, "settings.json"), "utf8")).packages ?? [];
+  } catch {
+    return; // fresh machine or unreadable settings: nothing to reconcile
+  }
+  const manifestNames = new Set(manifest.packages.map((pkg) => pkg.name));
+  const stale = [];
+  for (const entry of packages) {
+    const source = typeof entry === "string" ? entry : entry?.source;
+    if (typeof source !== "string") continue;
+    const name = packageNameFromSource(source);
+    if (name && SUPERSEDED_PACKAGES.has(name) && !manifestNames.has(name)) stale.push(source);
+  }
+  for (const source of stale) {
+    console.log(`\n→ Removing ${source} — superseded by the manifest; pi fails to launch while two extensions register the same tool name`);
+    run("pi", ["remove", source], { tolerant: true });
   }
 }
 
@@ -85,7 +140,11 @@ function main() {
     );
   }
 
-  // 2. A local-checkout harness (install.sh / install.ps1 set PI_HARNESS_SOURCE)
+  // 2. Reconcile the machine with the manifest: drop packages an older
+  //    distribution installed but the manifest has since replaced.
+  pruneSupersededPackages();
+
+  // 3. A local-checkout harness (install.sh / install.ps1 set PI_HARNESS_SOURCE)
   //    is registered in place: unlike git/npm sources, pi does not run npm for
   //    it, so the checkout's own dependencies must exist when pi launches and
   //    loads extensions/search.ts (glob, ignore) and ast-tools (node_modules/.bin/sg).
@@ -108,7 +167,7 @@ function main() {
     }
   }
 
-  // 3. Register every package in the distribution manifest.
+  // 4. Register every package in the distribution manifest.
   for (const pkg of manifest.packages) {
     const source =
       pkg.role === "harness" && harnessSource ? harnessSource : pkg.source;
@@ -116,7 +175,7 @@ function main() {
     run("pi", ["install", source]);
   }
 
-  // 4. pi-web-access ships with an interactive curator that opens a browser on
+  // 5. pi-web-access ships with an interactive curator that opens a browser on
   //    every search. Force it headless so installs never take over the browser.
   if (manifest.packages.some((pkg) => pkg.name === "pi-web-access")) {
     console.log("");
