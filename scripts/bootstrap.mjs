@@ -36,7 +36,7 @@ const MIN_NODE = [22, 19, 0];
 // extensions register the same tool name — pi-better-edit's `read` collides
 // with pi-hashline-edit-pro's, which superseded it in "subagents v2". The
 // installer prunes these so updates self-heal instead of dead-locking launch.
-const SUPERSEDED_PACKAGES = new Set(["pi-better-edit"]);
+const SUPERSEDED_PACKAGES = new Set(["pi-better-edit", "pi-automode"]);
 
 function fail(message) {
   console.error(`\n✖ ${message}`);

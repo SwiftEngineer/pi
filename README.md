@@ -9,7 +9,6 @@ A custom distribution of the [Pi coding agent](https://www.npmjs.com/package/@ea
 | **[`pi-web-access`](https://github.com/nicobailon/pi-web-access)** | Web search and content extraction: `web_search` (OpenAI/Brave/Parallel/Tavily/Exa/Perplexity/Gemini with fallback chains), `fetch_content` (URLs, GitHub repos, YouTube, PDFs), `get_search_content`. |
 | **[`pi-powerline-footer`](https://github.com/nicobailon/pi-powerline-footer)** | Powerline-style segmented footer for the Pi TUI: cwd/branch, context %, tokens/cost, model • thinking • provider. |
 | **[`pi-hashline-edit-pro`](https://github.com/YuGiMob/pi-hashline-edit-pro)** | Hash-anchored `read`/`edit`: content hashes replace line numbers, so edits land on the right line every time — stale or unseen ranges are hard-rejected with fresh anchors, old text is never re-typed, and same-file edits batch atomically. |
-| **[`pi-automode`](https://github.com/czottmann/pi-automode)** | Claude Code-style auto mode guardrail: intercepts agent tool calls before execution and blocks unsafe actions via permission deny rules, deterministic hard-deny checks, and a conservative classifier. |
 
 ## Install
 
@@ -107,6 +106,5 @@ pi remove npm:pi-mcp-adapter
 pi remove npm:pi-web-access
 pi remove https://github.com/nicobailon/pi-powerline-footer
 pi remove https://github.com/YuGiMob/pi-hashline-edit-pro
-pi remove https://github.com/czottmann/pi-automode
 npm uninstall -g @earendil-works/pi-coding-agent
 ```

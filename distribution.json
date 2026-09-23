@@ -32,12 +32,6 @@
       "role": "plugin",
       "source": "https://github.com/YuGiMob/pi-hashline-edit-pro",
       "description": "Helps models patch files more accurately"
-    },
-    {
-      "name": "@czottmann/pi-automode",
-      "role": "plugin",
-      "source": "https://github.com/czottmann/pi-automode",
-      "description": "Claude Code-style auto mode guardrail: intercepts agent tool calls before execution and blocks unsafe actions via permission deny rules, deterministic hard-deny checks, and a conservative classifier."
     }
   ]
 }
