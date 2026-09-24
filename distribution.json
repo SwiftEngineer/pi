@@ -7,7 +7,7 @@
       "name": "@swiftengineer/pi-harness",
       "role": "harness",
       "source": "ssh://git@github.com/SwiftEngineer/pi",
-      "description": "Default SwiftEngineer agent harness: compact prompt, tool policy, task/subagents, search, ls/find, AST, todos, ask."
+      "description": "Default SwiftEngineer agent harness: compact prompt, tool policy, task/subagents, search, ls/find, AST, todos."
     },
     {
       "name": "pi-mcp-adapter",
@@ -32,6 +32,12 @@
       "role": "plugin",
       "source": "https://github.com/YuGiMob/pi-hashline-edit-pro",
       "description": "Helps models patch files more accurately"
+    },
+    {
+      "name": "pi-ask-user",
+      "role": "plugin",
+      "source": "npm:pi-ask-user",
+      "description": "Interactive ask_user tool with searchable split-pane option UI, multi-select, freeform input, overlay/inline display, and a bundled ask-user decision-gating skill."
     }
   ]
 }

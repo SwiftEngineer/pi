@@ -4,7 +4,7 @@ A custom distribution of the [Pi coding agent](https://www.npmjs.com/package/@ea
 
 | Package | What it adds |
 | --- | --- |
-| **`@swiftengineer/pi-harness`** _(this repo)_ | The default agent harness: compact system prompt, tool policy, task/subagents, `search`, `ls`/`find`, AST tools, `todo_write`, `ask`, last-used-model defaults, and Z.ai tool-schema compatibility. |
+| **`@swiftengineer/pi-harness`** _(this repo)_ | The default agent harness: compact system prompt, tool policy, task/subagents, `search`, `ls`/`find`, AST tools, `todo_write`, last-used-model defaults, and Z.ai tool-schema compatibility. User clarification moved to the [`pi-ask-user`](https://github.com/edlsh/pi-ask-user) plugin (`ask_user` tool). |
 | **[`pi-mcp-adapter`](https://github.com/nicobailon/pi-mcp-adapter)** | Access every MCP server through a single ~200-token proxy tool, with lazy connections and idle disconnect — instead of paying 10k+ tokens per server. |
 | **[`pi-web-access`](https://github.com/nicobailon/pi-web-access)** | Web search and content extraction: `web_search` (OpenAI/Brave/Parallel/Tavily/Exa/Perplexity/Gemini with fallback chains), `fetch_content` (URLs, GitHub repos, YouTube, PDFs), `get_search_content`. |
 | **[`pi-powerline-footer`](https://github.com/nicobailon/pi-powerline-footer)** | Powerline-style segmented footer for the Pi TUI: cwd/branch, context %, tokens/cost, model • thinking • provider. |

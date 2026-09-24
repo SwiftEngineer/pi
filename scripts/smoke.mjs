@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createJiti } from "jiti";
+import { pathToFileURL } from "node:url";
 
 // The subagents extension registers nothing when it detects a subagent child;
 // the smoke asserts its full registration, so force the parent role.
@@ -51,7 +52,6 @@ for (const file of [
   "extensions/search.ts",
   "extensions/ast-tools.ts",
   "extensions/todo-write.ts",
-  "extensions/ask.ts",
   "extensions/context.ts",
   "extensions/subagents/index.ts",
 ]) {
@@ -380,41 +380,45 @@ if (!todoResult.content[0].text.includes("✓ Run smoke")) throw new Error("todo
   if (!after.content[0].text.includes("No todos.")) throw new Error("todo smoke failed: phases not reset on session start");
 }
 
-const ask = tools.get("ask");
-const askResult = await ask.execute("smoke-ask", { questions: [{ id: "choice", question: "Pick", options: [{ label: "A" }, { label: "B" }], recommended: 1 }] }, undefined, undefined, ctx);
-if (!askResult.content[0].text.includes("B")) throw new Error("ask smoke failed");
 
-// ask: in TUI mode, cancelling (Esc) must record no answer instead of the
-// recommended option, and labels that legitimately end with "(Recommended)"
-// must survive intact.
+// bootstrap purge: retired harness extensions (the old `ask` tool, superseded
+// by the pi-ask-user plugin) must be removed from any harness materialization
+// — file plus package.json registration — and stay a no-op on clean/missing
+// trees.
 {
-  const cancelCtx = { cwd: root, hasUI: true, ui: { async select() { return undefined; } } };
-  const cancelled = await ask.execute(
-    "smoke-ask-cancel",
-    { questions: [{ id: "pick", question: "Pick", options: [{ label: "A" }, { label: "B" }], recommended: 1 }] },
-    undefined,
-    undefined,
-    cancelCtx,
-  );
-  if (!cancelled.content[0].text.includes("(cancelled — no answer)")) throw new Error("ask smoke failed: cancel not reported");
-  if (cancelled.details.answers.pick !== undefined) throw new Error("ask smoke failed: cancel fabricated an answer");
-  if (!Array.isArray(cancelled.details.cancelled) || !cancelled.details.cancelled.includes("pick")) {
-    throw new Error("ask smoke failed: cancelled question not recorded");
+  const bootstrapUrl = pathToFileURL(path.join(root, "scripts/bootstrap.mjs")).href;
+  const { purgeRetiredHarnessExtensions, gitCloneDirFromSource } = await import(bootstrapUrl);
+
+  // The manifest's ssh harness source must map to pi's git clone layout.
+  const cloneDir = gitCloneDirFromSource("ssh://git@github.com/SwiftEngineer/pi");
+  if (cloneDir !== path.join("git", "github.com", "SwiftEngineer", "pi")) {
+    throw new Error(`purge smoke failed: clone dir derived as ${cloneDir}`);
   }
 
-  const pickCtx = {
-    cwd: root,
-    hasUI: true,
-    ui: { async select(_title, options) { return options.find((option) => option.includes("(Recommended)")); } },
-  };
-  const picked = await ask.execute(
-    "smoke-ask-label",
-    { questions: [{ id: "pick", question: "Pick", options: [{ label: "Keep (Recommended)" }] }] },
-    undefined,
-    undefined,
-    pickCtx,
-  );
-  if (picked.details.answers.pick[0] !== "Keep (Recommended)") throw new Error("ask smoke failed: label corrupted by suffix stripping");
+  const staleRoot = mkdtempSync(path.join(tmpdir(), "smoke-purge-"));
+  try {
+    const harnessDir = path.join(staleRoot, cloneDir);
+    mkdirSync(path.join(harnessDir, "extensions"), { recursive: true });
+    writeFileSync(path.join(harnessDir, "extensions", "ask.ts"), "// retired\n");
+    writeFileSync(path.join(harnessDir, "extensions", "keep.ts"), "// keep\n");
+    writeFileSync(
+      path.join(harnessDir, "package.json"),
+      `${JSON.stringify({ pi: { extensions: ["./extensions/keep.ts", "./extensions/ask.ts"] } })}\n`,
+    );
+
+    purgeRetiredHarnessExtensions([harnessDir, path.join(staleRoot, "no-such-dir")]);
+
+    if (existsSync(path.join(harnessDir, "extensions", "ask.ts"))) throw new Error("purge smoke failed: ask.ts survived");
+    if (!existsSync(path.join(harnessDir, "extensions", "keep.ts"))) throw new Error("purge smoke failed: sibling extension removed");
+    const purged = JSON.parse(readFileSync(path.join(harnessDir, "package.json"), "utf8"));
+    if (purged.pi.extensions.includes("./extensions/ask.ts")) throw new Error("purge smoke failed: manifest entry survived");
+    if (!purged.pi.extensions.includes("./extensions/keep.ts")) throw new Error("purge smoke failed: manifest over-pruned");
+
+    // Idempotent: a second run over the same (now clean) tree is a no-op.
+    purgeRetiredHarnessExtensions([harnessDir]);
+  } finally {
+    rmSync(staleRoot, { recursive: true, force: true });
+  }
 }
 
 const ast = tools.get("ast_grep");
@@ -443,7 +447,7 @@ if (!astResult.content[0].text.includes("AGENT_PROMPTS")) throw new Error("ast_g
   }
 }
 
-for (const required of ["search", "ast_grep", "ast_edit", "todo_write", "ask", "subagents", "subagents_send", "ls", "find"]) {
+for (const required of ["search", "ast_grep", "ast_edit", "todo_write", "subagents", "subagents_send", "ls", "find"]) {
   if (!tools.has(required)) throw new Error(`missing tool: ${required}`);
 }
 

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "SwiftEngineer Pi harness package: compact prompt, policy, background subagents, search, ls/find, AST, todos, ask tools, and Z.ai tool-schema compat.",
+  "description": "SwiftEngineer Pi harness package: compact prompt, policy, background subagents, search, ls/find, AST, todos, and Z.ai tool-schema compat.",
   "keywords": ["pi-package"],
   "license": "MIT",
   "bin": {
@@ -26,7 +26,6 @@
       "./extensions/search.ts",
       "./extensions/ast-tools.ts",
       "./extensions/todo-write.ts",
-      "./extensions/ask.ts",
       "./extensions/context.ts",
       "./extensions/zai-compat.ts",
       "./extensions/subagents/index.ts"

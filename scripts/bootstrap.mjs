@@ -13,8 +13,8 @@
 //   --dry-run           print the plan without changing anything
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { configureWebAccess } from "./web-access-config.mjs";
@@ -110,6 +110,61 @@ function pruneSupersededPackages() {
   }
 }
 
+// Harness extension files retired from the distribution. The harness `ask` tool
+// is superseded by the pi-ask-user plugin's `ask_user` tool; machines that
+// still hold an old harness git clone (or a PI_HARNESS_SOURCE override pointing
+// at a stale checkout) keep loading the old file, and pi has no per-extension
+// uninstall — so the installer removes the file and its package.json
+// registration wherever the harness is materialized. Idempotent: fresh
+// installs never contain these paths.
+const RETIRED_HARNESS_EXTENSIONS = ["./extensions/ask.ts"];
+
+// Install path (<agentDir>/git/<host>/<owner>/<repo>) for a git/ssh/https
+// package source, matching pi's git clone layout.
+function gitCloneDirFromSource(source) {
+  const segments = String(source)
+    .trim()
+    .replace(/^(https?|ssh|git):\/\//, "")
+    .replace(/^git@/, "")
+    .replace(/\.git$/, "")
+    .split("/")
+    .filter(Boolean);
+  return segments.length >= 3 ? path.join("git", ...segments.slice(0, 3)) : null;
+}
+
+// Delete retired extension files and their package.json registrations from
+// each harness location. Tolerant of missing dirs and unreadable manifests;
+// respects --dry-run.
+function purgeRetiredHarnessExtensions(harnessDirs) {
+  for (const dir of harnessDirs) {
+    if (!dir || !existsSync(dir)) continue;
+    for (const extension of RETIRED_HARNESS_EXTENSIONS) {
+      const file = path.join(dir, extension);
+      if (!existsSync(file)) continue;
+      console.log(`\n→ Purging retired harness extension ${extension} from ${dir}`);
+      if (!DRY_RUN) rmSync(file, { force: true });
+    }
+    const packageJsonPath = path.join(dir, "package.json");
+    let packageJson;
+    try {
+      packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
+    } catch {
+      continue; // no manifest to fix up
+    }
+    const extensions = packageJson?.pi?.extensions;
+    if (!Array.isArray(extensions)) continue;
+    const kept = extensions.filter((extension) => !RETIRED_HARNESS_EXTENSIONS.includes(extension));
+    if (kept.length === extensions.length) continue;
+    console.log(`→ Dropping retired extensions from ${packageJsonPath}`);
+    if (DRY_RUN) continue;
+    packageJson.pi.extensions = kept;
+    try {
+      writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
+    } catch {
+      console.error("  (ignored: could not rewrite package.json)");
+    }
+  }
+}
 function preflight() {
   const node = process.versions.node.split(".").map(Number);
   const tooOld =
@@ -175,6 +230,17 @@ function main() {
     run("pi", ["install", source]);
   }
 
+  // 4b. Purge harness extension files retired from the distribution: both a
+  //     previously installed git clone of the harness and a stale local
+  //     checkout (PI_HARNESS_SOURCE). No-op on fresh installs.
+  const agentDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+  const harnessPackage = manifest.packages.find((pkg) => pkg.role === "harness");
+  const harnessCloneDir = harnessPackage ? gitCloneDirFromSource(harnessPackage.source) : null;
+  purgeRetiredHarnessExtensions([
+    ...(harnessSource ? [harnessSource] : []),
+    ...(harnessCloneDir ? [path.join(agentDir, harnessCloneDir)] : []),
+  ]);
+
   // 5. pi-web-access ships with an interactive curator that opens a browser on
   //    every search. Force it headless so installs never take over the browser.
   if (manifest.packages.some((pkg) => pkg.name === "pi-web-access")) {
@@ -190,4 +256,10 @@ function main() {
   console.log("  • Update extensions later:    pi update --extensions\n");
 }
 
-main();
+// Only auto-run when invoked directly (install.sh / install.ps1 / update.sh /
+// `npm run setup`); scripts/smoke.mjs imports the purge helpers directly.
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main();
+}
+
+export { main, purgeRetiredHarnessExtensions, gitCloneDirFromSource };

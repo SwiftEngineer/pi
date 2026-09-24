@@ -6,8 +6,8 @@ const IS_SUBAGENT = !!process.env.SWIFT_PI_SUBAGENT;
 
 // Tool-routing line — the closing clause about delegation is dropped for children.
 const TOOL_ROUTING_TOOLS = IS_SUBAGENT
-  ? "Use read for file contents, ls for directory listings, find for filename/glob lookup, search for regex content lookup, AST tools for structural code search/rewrites, todo_write for phased task state, and ask for structured user questions."
-  : "Use read for file contents, ls for directory listings, find for filename/glob lookup, search for regex content lookup, AST tools for structural code search/rewrites, todo_write for phased task state, ask for structured user questions, subagents to dispatch independent work to isolated background agents, and subagents_send to re-engage an existing subagent by id.";
+  ? "Use read for file contents, ls for directory listings, find for filename/glob lookup, search for regex content lookup, AST tools for structural code search/rewrites, todo_write for phased task state, and ask_user for structured user questions."
+  : "Use read for file contents, ls for directory listings, find for filename/glob lookup, search for regex content lookup, AST tools for structural code search/rewrites, todo_write for phased task state, ask_user for structured user questions, subagents to dispatch independent work to isolated background agents, and subagents_send to re-engage an existing subagent by id.";
 
 // Workflow delegation bullets — omitted entirely for children. For the parent
 // they teach the non-blocking dispatch contract and the send contract (D7):
